@@ -23,12 +23,16 @@ from models import (
     EntityIndexItem,
     EntityOut,
     EntityPatch,
+    EntitySearchHit,
     Image,
     ImageOut,
+    ImageSearchHit,
     IngestUrlRequest,
     Job,
     JobOut,
     JobStatus,
+    SearchRequest,
+    SearchResponse,
     Section,
     SectionIndexItem,
     SectionOut,
@@ -456,6 +460,37 @@ async def get_topic_index(topic_id: str, db: DB):
                 ],
             )
             for st in subtopics
+        ],
+    )
+
+
+# ── Search ────────────────────────────────────────────────────────────────────
+
+@app.post("/topics/{topic_id}/search", response_model=SearchResponse)
+async def search_topic(topic_id: str, body: SearchRequest, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+
+    from search import semantic_search
+
+    raw = await semantic_search(topic_id, body.query, body.limit, db)
+
+    return SearchResponse(
+        entities=[
+            EntitySearchHit(
+                score=h["score"],
+                entity=EntityOut.model_validate(h["entity"]),
+                matched_excerpt=h["matched_excerpt"],
+            )
+            for h in raw["entities"]
+        ],
+        images=[
+            ImageSearchHit(
+                score=h["score"],
+                image=ImageOut.model_validate(h["image"]),
+            )
+            for h in raw["images"]
         ],
     )
 

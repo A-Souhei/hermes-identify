@@ -59,6 +59,20 @@ async def upsert_to_qdrant(points: list[dict]) -> None:
     await _get_qdrant().upsert(collection_name=COLLECTION, points=structs)
 
 
+async def search_vectors(query_vector: list[float], topic_id: str, limit: int) -> list:
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    return await _get_qdrant().search(
+        collection_name=COLLECTION,
+        query_vector=query_vector,
+        query_filter=Filter(
+            must=[FieldCondition(key="topic_id", match=MatchValue(value=topic_id))]
+        ),
+        limit=limit,
+        with_payload=True,
+    )
+
+
 async def describe_image(image_bytes: bytes, content_type: str) -> str:
     """Use vision LLM to generate a textual description of an image."""
     b64 = base64.b64encode(image_bytes).decode()

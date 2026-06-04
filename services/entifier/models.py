@@ -342,3 +342,19 @@ class IngestUrlRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     limit: int = 10
+
+
+class EntitySearchHit(BaseModel):
+    score: float
+    entity: EntityOut
+    matched_excerpt: str
+
+
+class ImageSearchHit(BaseModel):
+    score: float
+    image: ImageOut
+
+
+class SearchResponse(BaseModel):
+    entities: list[EntitySearchHit]
+    images: list[ImageSearchHit]
