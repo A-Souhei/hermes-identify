@@ -243,7 +243,10 @@ class TestRunProcessJob:
         await db_session.commit()
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
-        with patch("main.entifier_mod.entify_all_subtopics", new_callable=AsyncMock):
+        with (
+            patch("main.entifier_mod.entify_all_subtopics", new_callable=AsyncMock),
+            patch("main.indexer_mod.index_all_subtopics", new_callable=AsyncMock),
+        ):
             await _run_process_job("job-fp", session_factory=session_factory)
 
         await db_session.refresh(job)

@@ -281,6 +281,7 @@ class TestFullPipelineWithEntities:
         with (
             patch("classifier.discover_subtopics", discover_mock),
             patch("classifier.assign_chunks_to_subtopics", assign_mock),
+            patch("main.indexer_mod.index_all_subtopics", new_callable=AsyncMock),
         ):
             await _run_process_job("job-int", session_factory=session_factory)
 

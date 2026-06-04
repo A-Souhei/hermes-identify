@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 import embedder
 import entifier as entifier_mod
+import indexer as indexer_mod
 import storage
 from db import SessionLocal, create_tables, get_session
 from models import (
@@ -19,6 +20,7 @@ from models import (
     DocumentOut,
     Entity,
     EntityDetailOut,
+    EntityIndexItem,
     EntityOut,
     EntityPatch,
     Image,
@@ -27,12 +29,18 @@ from models import (
     Job,
     JobOut,
     JobStatus,
+    Section,
+    SectionIndexItem,
+    SectionOut,
+    SectionPatch,
     SourceType,
     SubTopic,
+    SubTopicIndexItem,
     SubTopicOut,
     SubTopicPatch,
     Topic,
     TopicCreate,
+    TopicIndex,
     TopicOut,
 )
 
@@ -261,6 +269,9 @@ async def _run_process_job(job_id: str, session_factory=None) -> None:
             await entifier_mod.entify_all_subtopics(subtopics, job.topic_id, db)
             await db.commit()
 
+            await indexer_mod.index_all_subtopics(subtopics, job.topic_id, db)
+            await db.commit()
+
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             await db.commit()
@@ -366,6 +377,87 @@ async def patch_entity(entity_id: str, body: EntityPatch, db: DB):
     await db.commit()
     await db.refresh(entity)
     return entity
+
+
+# ── Sections ──────────────────────────────────────────────────────────────────
+
+@app.get("/subtopics/{subtopic_id}/sections", response_model=list[SectionOut])
+async def list_sections(subtopic_id: str, db: DB):
+    st = await db.get(SubTopic, subtopic_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="subtopic not found")
+    result = await db.execute(
+        select(Section)
+        .where(Section.subtopic_id == subtopic_id)
+        .order_by(Section.order_index)
+    )
+    return result.scalars().all()
+
+
+@app.patch("/sections/{section_id}", response_model=SectionOut)
+async def patch_section(section_id: str, body: SectionPatch, db: DB):
+    section = await db.get(Section, section_id)
+    if not section:
+        raise HTTPException(status_code=404, detail="section not found")
+    if body.name is not None:
+        section.name = body.name
+    if body.description is not None:
+        section.description = body.description
+    if body.order_index is not None:
+        section.order_index = body.order_index
+    await db.commit()
+    await db.refresh(section)
+    return section
+
+
+# ── Index ─────────────────────────────────────────────────────────────────────
+
+@app.get("/topics/{topic_id}/index", response_model=TopicIndex)
+async def get_topic_index(topic_id: str, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+
+    st_result = await db.execute(
+        select(SubTopic)
+        .where(SubTopic.topic_id == topic_id)
+        .options(
+            selectinload(SubTopic.sections).selectinload(Section.entities)
+        )
+        .order_by(SubTopic.created_at)
+    )
+    subtopics = st_result.scalars().all()
+
+    return TopicIndex(
+        topic_id=topic_id,
+        topic_name=topic.name,
+        subtopics=[
+            SubTopicIndexItem(
+                id=st.id,
+                name=st.name,
+                description=st.description,
+                sections=[
+                    SectionIndexItem(
+                        id=s.id,
+                        name=s.name,
+                        description=s.description,
+                        order_index=s.order_index,
+                        entities=[
+                            EntityIndexItem(
+                                id=e.id,
+                                ref_id=e.ref_id,
+                                name=e.name,
+                                entity_type=e.entity_type,
+                            )
+                            for e in sorted(s.entities, key=lambda x: x.created_at)
+                        ],
+                    )
+                    for s in sorted(st.sections, key=lambda x: x.order_index)
+                ],
+            )
+            for st in subtopics
+        ],
+    )
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

@@ -74,6 +74,7 @@ class Topic(Base):
     subtopics: Mapped[list["SubTopic"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
     entities: Mapped[list["Entity"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
     jobs: Mapped[list["Job"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
+    sections: Mapped[list["Section"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
 
 
 class Document(Base):
@@ -138,6 +139,23 @@ class SubTopic(Base):
     topic: Mapped["Topic"] = relationship(back_populates="subtopics")
     entities: Mapped[list["Entity"]] = relationship(back_populates="subtopic")
     chunks: Mapped[list["Chunk"]] = relationship(secondary=chunk_subtopics, back_populates="subtopics")
+    sections: Mapped[list["Section"]] = relationship(back_populates="subtopic", cascade="all, delete-orphan")
+
+
+class Section(Base):
+    __tablename__ = "sections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
+    topic_id: Mapped[str] = mapped_column(String, ForeignKey("topics.id"), nullable=False)
+    subtopic_id: Mapped[str] = mapped_column(String, ForeignKey("subtopics.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    topic: Mapped["Topic"] = relationship(back_populates="sections")
+    subtopic: Mapped["SubTopic"] = relationship(back_populates="sections")
+    entities: Mapped[list["Entity"]] = relationship(back_populates="section")
 
 
 class Entity(Base):
@@ -146,6 +164,7 @@ class Entity(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
     topic_id: Mapped[str] = mapped_column(String, ForeignKey("topics.id"), nullable=False)
     subtopic_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("subtopics.id"))
+    section_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("sections.id"))
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     entity_type: Mapped[Optional[EntityType]] = mapped_column(Enum(EntityType))
@@ -154,6 +173,7 @@ class Entity(Base):
 
     topic: Mapped["Topic"] = relationship(back_populates="entities")
     subtopic: Mapped[Optional["SubTopic"]] = relationship(back_populates="entities")
+    section: Mapped[Optional["Section"]] = relationship(back_populates="entities")
     chunks: Mapped[list["Chunk"]] = relationship(secondary=chunk_entities, back_populates="entities")
     images: Mapped[list["Image"]] = relationship(secondary=image_entities, back_populates="entities")
 
@@ -230,6 +250,7 @@ class EntityOut(BaseModel):
     ref_id: str
     topic_id: str
     subtopic_id: Optional[str]
+    section_id: Optional[str]
     name: str
     description: Optional[str]
     entity_type: Optional[EntityType]
@@ -255,6 +276,52 @@ class ChunkSummary(BaseModel):
 class EntityDetailOut(EntityOut):
     chunks: list[ChunkSummary] = []
     images: list[ImageOut] = []
+
+
+class SectionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    subtopic_id: str
+    topic_id: str
+    name: str
+    description: Optional[str]
+    order_index: int
+    created_at: datetime
+
+
+class SectionPatch(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    order_index: Optional[int] = None
+
+
+class EntityIndexItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    ref_id: str
+    name: str
+    entity_type: Optional[EntityType]
+
+
+class SectionIndexItem(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    order_index: int
+    entities: list[EntityIndexItem]
+
+
+class SubTopicIndexItem(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    sections: list[SectionIndexItem]
+
+
+class TopicIndex(BaseModel):
+    topic_id: str
+    topic_name: str
+    subtopics: list[SubTopicIndexItem]
 
 
 class JobOut(BaseModel):

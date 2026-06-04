@@ -94,7 +94,7 @@ class TestDatabaseTables:
 
         expected = {
             "topics", "documents", "chunks", "images",
-            "subtopics", "entities", "jobs",
+            "subtopics", "sections", "entities", "jobs",
             "chunk_entities", "image_entities", "chunk_subtopics",
         }
         assert expected.issubset(set(table_names))
