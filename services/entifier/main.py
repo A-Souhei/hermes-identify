@@ -1,14 +1,15 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import embedder
 import storage
-from db import create_tables, get_session
+from db import SessionLocal, create_tables, get_session
 from models import (
     Chunk,
     Document,
@@ -16,7 +17,13 @@ from models import (
     Image,
     ImageOut,
     IngestUrlRequest,
+    Job,
+    JobOut,
+    JobStatus,
     SourceType,
+    SubTopic,
+    SubTopicOut,
+    SubTopicPatch,
     Topic,
     TopicCreate,
     TopicOut,
@@ -213,6 +220,97 @@ async def list_images(topic_id: str, db: DB):
         select(Image).where(Image.topic_id == topic_id).order_by(Image.created_at)
     )
     return result.scalars().all()
+
+
+# ── Background job runner ─────────────────────────────────────────────────────
+
+async def _run_process_job(job_id: str, session_factory=None) -> None:
+    from classifier import assign_chunks_to_subtopics, discover_subtopics
+
+    factory = session_factory or SessionLocal
+    async with factory() as db:
+        job = await db.get(Job, job_id)
+        if not job:
+            return
+        try:
+            job.status = JobStatus.RUNNING
+            await db.commit()
+
+            result = await db.execute(select(Chunk).where(Chunk.topic_id == job.topic_id))
+            chunks = result.scalars().all()
+
+            if not chunks:
+                job.status = JobStatus.COMPLETED
+                job.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                return
+
+            subtopics = await discover_subtopics(chunks, job.topic_id, db)
+            await db.commit()
+
+            await assign_chunks_to_subtopics(chunks, subtopics, db)
+            await db.commit()
+
+            job.status = JobStatus.COMPLETED
+            job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+
+        except Exception as exc:
+            job.status = JobStatus.FAILED
+            job.error = str(exc)
+            job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            raise
+
+
+# ── Process job ───────────────────────────────────────────────────────────────
+
+@app.post("/topics/{topic_id}/process", response_model=JobOut, status_code=202)
+async def process_topic(topic_id: str, db: DB, background_tasks: BackgroundTasks):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    job = Job(topic_id=topic_id, type="process")
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    background_tasks.add_task(_run_process_job, job.id)
+    return job
+
+
+@app.get("/jobs/{job_id}", response_model=JobOut)
+async def get_job(job_id: str, db: DB):
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+# ── Sub-topics ────────────────────────────────────────────────────────────────
+
+@app.get("/topics/{topic_id}/subtopics", response_model=list[SubTopicOut])
+async def list_subtopics(topic_id: str, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    result = await db.execute(
+        select(SubTopic).where(SubTopic.topic_id == topic_id).order_by(SubTopic.created_at)
+    )
+    return result.scalars().all()
+
+
+@app.patch("/subtopics/{subtopic_id}", response_model=SubTopicOut)
+async def patch_subtopic(subtopic_id: str, body: SubTopicPatch, db: DB):
+    st = await db.get(SubTopic, subtopic_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="subtopic not found")
+    if body.name is not None:
+        st.name = body.name
+    if body.description is not None:
+        st.description = body.description
+    await db.commit()
+    await db.refresh(st)
+    return st
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

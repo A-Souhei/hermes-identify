@@ -32,6 +32,13 @@ image_entities = Table(
     Column("entity_id", String, ForeignKey("entities.id"), primary_key=True),
 )
 
+chunk_subtopics = Table(
+    "chunk_subtopics",
+    Base.metadata,
+    Column("chunk_id", String, ForeignKey("chunks.id"), primary_key=True),
+    Column("subtopic_id", String, ForeignKey("subtopics.id"), primary_key=True),
+)
+
 
 class SourceType(PyEnum):
     FILE = "file"
@@ -99,6 +106,7 @@ class Chunk(Base):
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
     entities: Mapped[list["Entity"]] = relationship(secondary=chunk_entities, back_populates="chunks")
+    subtopics: Mapped[list["SubTopic"]] = relationship(secondary=chunk_subtopics, back_populates="chunks")
 
 
 class Image(Base):
@@ -129,6 +137,7 @@ class SubTopic(Base):
 
     topic: Mapped["Topic"] = relationship(back_populates="subtopics")
     entities: Mapped[list["Entity"]] = relationship(back_populates="subtopic")
+    chunks: Mapped[list["Chunk"]] = relationship(secondary=chunk_subtopics, back_populates="subtopics")
 
 
 class Entity(Base):
