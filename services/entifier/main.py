@@ -1,19 +1,26 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 import embedder
+import entifier as entifier_mod
 import storage
 from db import SessionLocal, create_tables, get_session
 from models import (
     Chunk,
+    ChunkSummary,
     Document,
     DocumentOut,
+    Entity,
+    EntityDetailOut,
+    EntityOut,
+    EntityPatch,
     Image,
     ImageOut,
     IngestUrlRequest,
@@ -251,6 +258,9 @@ async def _run_process_job(job_id: str, session_factory=None) -> None:
             await assign_chunks_to_subtopics(chunks, subtopics, db)
             await db.commit()
 
+            await entifier_mod.entify_all_subtopics(subtopics, job.topic_id, db)
+            await db.commit()
+
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             await db.commit()
@@ -311,6 +321,51 @@ async def patch_subtopic(subtopic_id: str, body: SubTopicPatch, db: DB):
     await db.commit()
     await db.refresh(st)
     return st
+
+
+# ── Entities ──────────────────────────────────────────────────────────────────
+
+@app.get("/topics/{topic_id}/entities", response_model=list[EntityOut])
+async def list_entities(topic_id: str, db: DB, subtopic_id: Optional[str] = None):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    q = select(Entity).where(Entity.topic_id == topic_id)
+    if subtopic_id:
+        q = q.where(Entity.subtopic_id == subtopic_id)
+    result = await db.execute(q.order_by(Entity.created_at))
+    return result.scalars().all()
+
+
+@app.get("/entities/{entity_id}", response_model=EntityDetailOut)
+async def get_entity(entity_id: str, db: DB):
+    result = await db.execute(
+        select(Entity)
+        .where(Entity.id == entity_id)
+        .options(selectinload(Entity.chunks), selectinload(Entity.images))
+    )
+    entity = result.scalar_one_or_none()
+    if not entity:
+        raise HTTPException(status_code=404, detail="entity not found")
+    return entity
+
+
+@app.patch("/entities/{entity_id}", response_model=EntityOut)
+async def patch_entity(entity_id: str, body: EntityPatch, db: DB):
+    entity = await db.get(Entity, entity_id)
+    if not entity:
+        raise HTTPException(status_code=404, detail="entity not found")
+    if body.name is not None:
+        entity.name = body.name
+    if body.description is not None:
+        entity.description = body.description
+    if body.entity_type is not None:
+        entity.entity_type = body.entity_type
+    if body.subtopic_id is not None:
+        entity.subtopic_id = body.subtopic_id
+    await db.commit()
+    await db.refresh(entity)
+    return entity
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

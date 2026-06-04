@@ -243,6 +243,20 @@ class EntityPatch(BaseModel):
     subtopic_id: Optional[str] = None
 
 
+class ChunkSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    document_id: str
+    content: str
+    chunk_index: int
+    token_count: int
+
+
+class EntityDetailOut(EntityOut):
+    chunks: list[ChunkSummary] = []
+    images: list[ImageOut] = []
+
+
 class JobOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str

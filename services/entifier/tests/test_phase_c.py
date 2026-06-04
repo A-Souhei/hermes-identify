@@ -222,6 +222,7 @@ class TestRunProcessJob:
         from models import Document, SourceType, SubTopic, Topic, chunk_subtopics
         from main import _run_process_job
         from sqlalchemy import select
+        from unittest.mock import patch, AsyncMock
 
         topic = Topic(id="topic-fp", name="T")
         db_session.add(topic)
@@ -242,7 +243,8 @@ class TestRunProcessJob:
         await db_session.commit()
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
-        await _run_process_job("job-fp", session_factory=session_factory)
+        with patch("main.entifier_mod.entify_all_subtopics", new_callable=AsyncMock):
+            await _run_process_job("job-fp", session_factory=session_factory)
 
         await db_session.refresh(job)
         assert job.status == JobStatus.COMPLETED
