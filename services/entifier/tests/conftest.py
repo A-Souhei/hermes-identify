@@ -1,5 +1,5 @@
 from typing import AsyncGenerator
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -41,7 +41,11 @@ async def client(test_engine) -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_session] = override_get_session
 
-    with patch("main.create_tables"):
+    with (
+        patch("main.create_tables", new_callable=AsyncMock),
+        patch("storage.ensure_bucket", new_callable=AsyncMock),
+        patch("embedder.init_qdrant", new_callable=AsyncMock),
+    ):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             yield ac
 

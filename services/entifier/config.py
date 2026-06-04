@@ -11,7 +11,10 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_chat_model: str = "gpt-4o-mini"
     firecrawl_url: str = ""
-    uploads_dir: str = "/app/uploads"
+    minio_url: str = "http://minio:9000"
+    minio_access_key: str = "entifier"
+    minio_secret_key: str = "entifier123"
+    minio_bucket: str = "entifier-files"
 
 
 settings = Settings()

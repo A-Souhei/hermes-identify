@@ -1,0 +1,250 @@
+import io
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from httpx import AsyncClient
+from pypdf import PdfWriter
+
+DUMMY_VECTOR = [0.0] * 1536
+DUMMY_EMBEDDINGS = [DUMMY_VECTOR]
+DUMMY_DESCRIPTION = "A detailed image showing a chart with data."
+
+
+def _make_blank_pdf() -> bytes:
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+@pytest.fixture()
+def mock_externals():
+    with (
+        patch("storage.upload_file", new_callable=AsyncMock, return_value="test/key"),
+        patch("embedder.embed_texts", new_callable=AsyncMock, return_value=DUMMY_EMBEDDINGS),
+        patch("embedder.upsert_to_qdrant", new_callable=AsyncMock),
+        patch("embedder.describe_image", new_callable=AsyncMock, return_value=DUMMY_DESCRIPTION),
+    ):
+        yield
+
+
+# ── Chunker unit tests (pure, no mocks) ─────────────────────────────────────
+
+class TestChunkText:
+    def test_empty_returns_empty(self):
+        from ingestor import chunk_text
+        assert chunk_text("") == []
+
+    def test_short_text_single_chunk(self):
+        from ingestor import chunk_text
+        result = chunk_text("Hello world")
+        assert result == ["Hello world"]
+
+    def test_long_text_produces_multiple_chunks(self):
+        from ingestor import chunk_text
+        text = "word " * 2000
+        chunks = chunk_text(text)
+        assert len(chunks) > 1
+
+    def test_chunks_have_overlap(self):
+        from ingestor import chunk_text
+        text = "paragraph one. " * 400 + "paragraph two. " * 400
+        chunks = chunk_text(text)
+        assert len(chunks) >= 2
+        # overlap means end of first chunk shares content with start of second
+        assert chunks[0][-50:] in chunks[1] or chunks[1][:50] in chunks[0]
+
+    def test_no_empty_chunks(self):
+        from ingestor import chunk_text
+        text = "\n\n".join(["word " * 300] * 5)
+        assert all(c.strip() for c in chunk_text(text))
+
+
+# ── Parser unit tests ────────────────────────────────────────────────────────
+
+class TestParseMd:
+    def test_utf8_decoded(self):
+        from ingestor import parse_md
+        result = parse_md(b"# Hello\nWorld")
+        assert result == "# Hello\nWorld"
+
+    def test_strips_whitespace(self):
+        from ingestor import parse_md
+        assert parse_md(b"  hello  ") == "hello"
+
+
+class TestParsePdf:
+    async def test_returns_text_and_page_count(self):
+        from ingestor import parse_pdf
+        pdf_bytes = _make_blank_pdf()
+        text, pages = await parse_pdf(pdf_bytes)
+        assert isinstance(text, str)
+        assert pages == 1
+
+    async def test_invalid_pdf_raises(self):
+        from ingestor import parse_pdf
+        with pytest.raises(Exception):
+            await parse_pdf(b"not a pdf")
+
+
+# ── Ingest file endpoint ─────────────────────────────────────────────────────
+
+class TestIngestFile:
+    async def test_ingest_md_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("doc.md", b"# Hello\nSome content here.", "text/markdown")},
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["topic_id"] == tid
+        assert data["filename"] == "doc.md"
+        assert data["source_type"] == "file"
+
+    async def test_ingest_pdf_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        pdf_bytes = _make_blank_pdf()
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("report.pdf", pdf_bytes, "application/pdf")},
+        )
+        assert r.status_code == 201
+        assert r.json()["filename"] == "report.pdf"
+
+    async def test_unsupported_format_returns_422(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("doc.docx", b"content", "application/octet-stream")},
+        )
+        assert r.status_code == 422
+
+    async def test_ingest_file_topic_not_found(self, client: AsyncClient, mock_externals):
+        r = await client.post(
+            "/topics/nonexistent/ingest/file",
+            files={"file": ("doc.md", b"content", "text/markdown")},
+        )
+        assert r.status_code == 404
+
+
+# ── Ingest URL endpoint ──────────────────────────────────────────────────────
+
+class TestIngestUrl:
+    async def test_ingest_url_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        with patch("ingestor.fetch_url", new_callable=AsyncMock, return_value="# Page content"):
+            r = await client.post(
+                f"/topics/{tid}/ingest/url",
+                json={"url": "https://example.com/page"},
+            )
+
+        assert r.status_code == 201
+        data = r.json()
+        assert data["source_type"] == "url"
+        assert data["source_ref"] == "https://example.com/page"
+
+    async def test_ingest_url_topic_not_found(self, client: AsyncClient, mock_externals):
+        with patch("ingestor.fetch_url", new_callable=AsyncMock, return_value="content"):
+            r = await client.post(
+                "/topics/nonexistent/ingest/url",
+                json={"url": "https://example.com"},
+            )
+        assert r.status_code == 404
+
+
+# ── Ingest image endpoint ────────────────────────────────────────────────────
+
+class TestIngestImage:
+    async def test_ingest_png_creates_image(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/image",
+            files={"file": ("chart.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["filename"] == "chart.png"
+        assert data["description"] == DUMMY_DESCRIPTION
+
+    async def test_unsupported_image_format_returns_422(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/image",
+            files={"file": ("file.bmp", b"content", "image/bmp")},
+        )
+        assert r.status_code == 422
+
+    async def test_ingest_image_topic_not_found(self, client: AsyncClient, mock_externals):
+        r = await client.post(
+            "/topics/nonexistent/ingest/image",
+            files={"file": ("img.png", b"content", "image/png")},
+        )
+        assert r.status_code == 404
+
+
+# ── List endpoints ───────────────────────────────────────────────────────────
+
+class TestListDocuments:
+    async def test_empty_list(self, client: AsyncClient):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+        r = await client.get(f"/topics/{tid}/documents")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_lists_after_ingest(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+        await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("a.md", b"content a", "text/markdown")},
+        )
+        await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("b.md", b"content b", "text/markdown")},
+        )
+        r = await client.get(f"/topics/{tid}/documents")
+        assert r.status_code == 200
+        assert len(r.json()) == 2
+
+    async def test_topic_not_found_returns_404(self, client: AsyncClient):
+        r = await client.get("/topics/nope/documents")
+        assert r.status_code == 404
+
+
+class TestListImages:
+    async def test_empty_list(self, client: AsyncClient):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+        r = await client.get(f"/topics/{tid}/images")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    async def test_lists_after_ingest(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+        await client.post(
+            f"/topics/{tid}/ingest/image",
+            files={"file": ("img.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
+        )
+        r = await client.get(f"/topics/{tid}/images")
+        assert r.status_code == 200
+        assert len(r.json()) == 1
+
+    async def test_topic_not_found_returns_404(self, client: AsyncClient):
+        r = await client.get("/topics/nope/images")
+        assert r.status_code == 404

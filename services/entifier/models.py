@@ -78,6 +78,7 @@ class Document(Base):
     source_ref: Mapped[str] = mapped_column(Text, nullable=False)
     filename: Mapped[Optional[str]] = mapped_column(String)
     page_count: Mapped[Optional[int]] = mapped_column(Integer)
+    minio_key: Mapped[Optional[str]] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     topic: Mapped["Topic"] = relationship(back_populates="documents")
@@ -109,6 +110,7 @@ class Image(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     qdrant_id: Mapped[Optional[str]] = mapped_column(String)
+    minio_key: Mapped[Optional[str]] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     topic: Mapped["Topic"] = relationship(back_populates="images")
@@ -184,6 +186,7 @@ class DocumentOut(BaseModel):
     source_ref: str
     filename: Optional[str]
     page_count: Optional[int]
+    minio_key: Optional[str]
     created_at: datetime
 
 
@@ -193,6 +196,7 @@ class ImageOut(BaseModel):
     topic_id: str
     filename: str
     description: Optional[str]
+    minio_key: Optional[str]
     created_at: datetime
 
 
