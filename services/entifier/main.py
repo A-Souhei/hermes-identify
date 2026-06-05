@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -12,7 +12,7 @@ import embedder
 import entifier as entifier_mod
 import indexer as indexer_mod
 import storage
-from db import SessionLocal, create_tables, get_session
+from db import SessionLocal, create_tables, get_session, run_migrations
 from models import (
     Chunk,
     ChunkSummary,
@@ -46,6 +46,7 @@ from models import (
     TopicCreate,
     TopicIndex,
     TopicOut,
+    topic_links,
 )
 
 ALLOWED_DOC_EXTENSIONS = {".pdf", ".md", ".csv", ".json", ".yaml", ".yml"}
@@ -64,6 +65,7 @@ ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_tables()
+    await run_migrations()
     await storage.ensure_bucket()
     await embedder.init_qdrant()
     yield
@@ -109,7 +111,9 @@ async def get_topic(topic_id: str, db: DB):
 # ── Ingest ────────────────────────────────────────────────────────────────────
 
 @app.post("/topics/{topic_id}/ingest/file", response_model=DocumentOut, status_code=201)
-async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...)):
+async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
+    if context and len(context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
@@ -126,6 +130,7 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...)):
         source_ref=file.filename or "unknown",
         filename=file.filename,
     )
+    doc.context = context or None
     db.add(doc)
     await db.flush()
 
@@ -151,12 +156,14 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...)):
     await db.commit()
     await db.refresh(doc)
 
-    await _store_chunks(text, doc.id, topic_id, db)
+    await _store_chunks(text, doc.id, topic_id, db, context=doc.context)
     return doc
 
 
 @app.post("/topics/{topic_id}/ingest/url", response_model=DocumentOut, status_code=201)
 async def ingest_url(topic_id: str, body: IngestUrlRequest, db: DB):
+    if body.context and len(body.context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
@@ -171,6 +178,7 @@ async def ingest_url(topic_id: str, body: IngestUrlRequest, db: DB):
         source_ref=body.url,
         filename="page.md",
     )
+    doc.context = body.context or None
     db.add(doc)
     await db.flush()
 
@@ -181,12 +189,14 @@ async def ingest_url(topic_id: str, body: IngestUrlRequest, db: DB):
     await db.commit()
     await db.refresh(doc)
 
-    await _store_chunks(text, doc.id, topic_id, db)
+    await _store_chunks(text, doc.id, topic_id, db, context=doc.context)
     return doc
 
 
 @app.post("/topics/{topic_id}/ingest/image", response_model=ImageOut, status_code=201)
-async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...)):
+async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
+    if context and len(context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
@@ -213,13 +223,13 @@ async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...)):
     img.file_path = minio_key
 
     description = await embedder.describe_image(content, content_type)
-    img.description = description
+    img.description = description or None
+    embed_source = f"[User context: {context}]\n\n{description or ''}".strip() if context else description
 
     await db.commit()
-    await db.flush()
 
-    if description:
-        vectors = await embedder.embed_texts([description])
+    if embed_source:
+        vectors = await embedder.embed_texts([embed_source])
         if vectors:
             await embedder.upsert_to_qdrant([
                 {
@@ -532,10 +542,77 @@ async def search_topic(topic_id: str, body: SearchRequest, db: DB):
     )
 
 
+# ── Topic links ───────────────────────────────────────────────────────────────
+
+@app.get("/topics/{topic_id}/links", response_model=list[TopicOut])
+async def list_topic_links(topic_id: str, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    result_a = await db.execute(
+        select(Topic).join(topic_links, topic_links.c.topic_id_b == Topic.id)
+        .where(topic_links.c.topic_id_a == topic_id)
+    )
+    result_b = await db.execute(
+        select(Topic).join(topic_links, topic_links.c.topic_id_a == Topic.id)
+        .where(topic_links.c.topic_id_b == topic_id)
+    )
+    seen: set[str] = set()
+    topics = []
+    for t in list(result_a.scalars().all()) + list(result_b.scalars().all()):
+        if t.id not in seen:
+            seen.add(t.id)
+            topics.append(t)
+    return topics
+
+
+@app.post("/topics/{topic_id}/links", response_model=TopicOut, status_code=201)
+async def add_topic_link(topic_id: str, body: dict, db: DB):
+    from sqlalchemy.exc import IntegrityError
+
+    linked_id = body.get("linked_topic_id")
+    if not linked_id or linked_id == topic_id:
+        raise HTTPException(status_code=422, detail="invalid linked_topic_id")
+    topic = await db.get(Topic, topic_id)
+    linked = await db.get(Topic, linked_id)
+    if not topic or not linked:
+        raise HTTPException(status_code=404, detail="topic not found")
+
+    id_a, id_b = min(topic_id, linked_id), max(topic_id, linked_id)
+    existing = await db.execute(
+        select(topic_links).where(
+            (topic_links.c.topic_id_a == id_a) & (topic_links.c.topic_id_b == id_b)
+        )
+    )
+    if existing.first():
+        raise HTTPException(status_code=409, detail="already linked")
+    try:
+        await db.execute(topic_links.insert().values(topic_id_a=id_a, topic_id_b=id_b))
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="already linked")
+    return linked
+
+
+@app.delete("/topics/{topic_id}/links/{other_id}", status_code=204)
+async def remove_topic_link(topic_id: str, other_id: str, db: DB):
+    id_a, id_b = min(topic_id, other_id), max(topic_id, other_id)
+    await db.execute(
+        topic_links.delete().where(
+            (topic_links.c.topic_id_a == id_a) & (topic_links.c.topic_id_b == id_b)
+        )
+    )
+    await db.commit()
+
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-async def _store_chunks(text: str, doc_id: str, topic_id: str, db: AsyncSession) -> None:
+async def _store_chunks(text: str, doc_id: str, topic_id: str, db: AsyncSession, context: Optional[str] = None) -> None:
     from ingestor import chunk_text
+
+    if context:
+        text = f"[User context: {context}]\n\n{text}"
 
     texts = chunk_text(text)
     if not texts:

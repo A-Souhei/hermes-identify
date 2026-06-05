@@ -39,6 +39,13 @@ chunk_subtopics = Table(
     Column("subtopic_id", String, ForeignKey("subtopics.id"), primary_key=True),
 )
 
+topic_links = Table(
+    "topic_links",
+    Base.metadata,
+    Column("topic_id_a", String, ForeignKey("topics.id", ondelete="CASCADE"), primary_key=True),
+    Column("topic_id_b", String, ForeignKey("topics.id", ondelete="CASCADE"), primary_key=True),
+)
+
 
 class SourceType(PyEnum):
     FILE = "file"
@@ -75,6 +82,12 @@ class Topic(Base):
     entities: Mapped[list["Entity"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
     jobs: Mapped[list["Job"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
     sections: Mapped[list["Section"]] = relationship(back_populates="topic", cascade="all, delete-orphan")
+    linked_topics: Mapped[list["Topic"]] = relationship(
+        "Topic",
+        secondary=topic_links,
+        primaryjoin="Topic.id == topic_links.c.topic_id_a",
+        secondaryjoin="Topic.id == topic_links.c.topic_id_b",
+    )
 
 
 class Document(Base):
@@ -87,6 +100,7 @@ class Document(Base):
     filename: Mapped[Optional[str]] = mapped_column(String)
     page_count: Mapped[Optional[int]] = mapped_column(Integer)
     minio_key: Mapped[Optional[str]] = mapped_column(String)
+    context: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     topic: Mapped["Topic"] = relationship(back_populates="documents")
@@ -216,6 +230,7 @@ class DocumentOut(BaseModel):
     filename: Optional[str]
     page_count: Optional[int]
     minio_key: Optional[str]
+    context: Optional[str]
     created_at: datetime
 
 
@@ -337,6 +352,7 @@ class JobOut(BaseModel):
 
 class IngestUrlRequest(BaseModel):
     url: str
+    context: Optional[str] = None
 
 
 class SearchRequest(BaseModel):

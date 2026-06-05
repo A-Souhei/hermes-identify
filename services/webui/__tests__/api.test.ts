@@ -118,6 +118,30 @@ describe('api.topics', () => {
     expect(call[1].body).toBeInstanceOf(FormData)
   })
 
+  it('ingestFile appends context to FormData when provided', async () => {
+    mockFetch({ id: 'd3', topic_id: 'abc', source_type: 'file', source_ref: 'doc.md', filename: 'doc.md', page_count: null, minio_key: null, context: 'my notes', created_at: '' })
+    const file = new File(['# Doc'], 'doc.md', { type: 'text/markdown' })
+    await api.topics.ingestFile('abc', file, 'my notes')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    const fd = call[1].body as FormData
+    expect(fd.get('context')).toBe('my notes')
+  })
+
+  it('ingestUrl includes context in JSON body when provided', async () => {
+    mockFetch({ id: 'd4', topic_id: 'abc', source_type: 'url', source_ref: 'https://example.com', filename: null, page_count: null, minio_key: null, context: 'url notes', created_at: '' })
+    await api.topics.ingestUrl('abc', 'https://example.com', 'url notes')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(JSON.parse(call[1].body)).toMatchObject({ url: 'https://example.com', context: 'url notes' })
+  })
+
+  it('ingestUrl omits context key when not provided', async () => {
+    mockFetch({ id: 'd5', topic_id: 'abc', source_type: 'url', source_ref: 'https://example.com', filename: null, page_count: null, minio_key: null, created_at: '' })
+    await api.topics.ingestUrl('abc', 'https://example.com')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    const body = JSON.parse(call[1].body)
+    expect(body).not.toHaveProperty('context')
+  })
+
   it('ingestImage calls POST /api/entifier/topics/:id/ingest/image with FormData body', async () => {
     mockFetch({ id: 'img1', topic_id: 'abc', filename: 'photo.png', description: null, minio_key: null, created_at: '' })
     const file = new File(['img'], 'photo.png', { type: 'image/png' })
@@ -125,6 +149,38 @@ describe('api.topics', () => {
     const call = (global.fetch as jest.Mock).mock.calls[0]
     expect(call[0]).toBe('/api/entifier/topics/abc/ingest/image')
     expect(call[1].body).toBeInstanceOf(FormData)
+  })
+
+  it('ingestImage appends context to FormData when provided', async () => {
+    mockFetch({ id: 'img2', topic_id: 'abc', filename: 'photo.png', description: 'AI desc', minio_key: null, created_at: '' })
+    const file = new File(['img'], 'photo.png', { type: 'image/png' })
+    await api.topics.ingestImage('abc', file, 'image notes')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    const fd = call[1].body as FormData
+    expect(fd.get('context')).toBe('image notes')
+  })
+
+  it('links calls GET /api/entifier/topics/:id/links', async () => {
+    mockFetch([{ id: 'other', name: 'Other', description: null, created_at: '' }])
+    await api.topics.links('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/links', expect.objectContaining({}))
+  })
+
+  it('addLink posts linked_topic_id to /api/entifier/topics/:id/links', async () => {
+    mockFetch({ id: 'xyz', name: 'Linked', description: null, created_at: '' })
+    await api.topics.addLink('abc', 'xyz')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/links')
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toMatchObject({ linked_topic_id: 'xyz' })
+  })
+
+  it('removeLink calls DELETE /api/entifier/topics/:id/links/:otherId', async () => {
+    mockFetch(null)
+    await api.topics.removeLink('abc', 'xyz').catch(() => {})
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/links/xyz')
+    expect(call[1].method).toBe('DELETE')
   })
   it('search posts query to /api/entifier/topics/:id/search', async () => {
     mockFetch({ entities: [], images: [] })

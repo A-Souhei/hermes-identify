@@ -36,8 +36,11 @@ export default function CataloguePage() {
   const cachedIdsRef = useRef<Set<string>>(new Set())   // sync cached tracker
   const indexCacheRef = useRef<Record<string, TopicIndex>>({})
   const expandAllActiveRef = useRef(false)
+  const topicsOpenRef = useRef<Record<string, boolean>>({})
+  const refreshTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   useEffect(() => { indexCacheRef.current = indexCache }, [indexCache])
+  useEffect(() => { topicsOpenRef.current = topicsOpen }, [topicsOpen])
   useEffect(() => { return () => { mountedRef.current = false } }, [])
 
   // ── Load topics ─────────────────────────────────────────────────────────────
@@ -111,6 +114,32 @@ export default function CataloguePage() {
       }
     }
   }, []) // stable — all mutable state accessed via refs
+
+  // ── Live update via BroadcastChannel ────────────────────────────────────────
+  // Ingest tab posts { type: 'topic-updated', topicId } after each upload.
+  // Debounce per topic (4 s) so a batch of rapid uploads triggers one refresh.
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return
+    const bc = new BroadcastChannel('hermes-ingest')
+    bc.onmessage = (e) => {
+      if (e.data?.type !== 'topic-updated') return
+      const topicId = e.data.topicId as string
+      if (!topicId) return
+      if (refreshTimersRef.current[topicId]) clearTimeout(refreshTimersRef.current[topicId])
+      refreshTimersRef.current[topicId] = setTimeout(() => {
+        delete refreshTimersRef.current[topicId]
+        if (!mountedRef.current) return
+        cachedIdsRef.current.delete(topicId)
+        setIndexCache(prev => { const n = { ...prev }; delete n[topicId]; return n })
+        if (topicsOpenRef.current[topicId]) loadIndex(topicId)
+      }, 4000)
+    }
+    return () => {
+      bc.close()
+      Object.values(refreshTimersRef.current).forEach(clearTimeout)
+    }
+  }, [loadIndex])
 
   // ── Toggle handlers ──────────────────────────────────────────────────────────
 
