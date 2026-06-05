@@ -61,6 +61,17 @@ services:
       timeout: 5s
       retries: 5
 
+  webui:
+    build: services/webui
+    image: hermes-docwriter-webui:latest
+    ports:
+      - "32180:3000"
+    environment:
+      ENTIFIER_URL: http://entifier:8000
+    depends_on:
+      - entifier
+    restart: unless-stopped
+
 volumes:
   pgdata:
   qdrantdata:
