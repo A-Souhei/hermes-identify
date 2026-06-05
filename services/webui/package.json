@@ -9,10 +9,14 @@
     "test": "jest"
   },
   "dependencies": {
+    "@types/three": "^0.184.1",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-force-graph-2d": "^1.29.1"
+    "react-force-graph-2d": "^1.29.1",
+    "react-force-graph-3d": "^1.29.1",
+    "three": "^0.184.0",
+    "three-spritetext": "^1.10.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

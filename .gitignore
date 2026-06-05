@@ -10,3 +10,4 @@ ENTIFIER_PLAN.md
 WEBUI_PLAN.md
 node_modules/
 .next/
+*.tsbuildinfo

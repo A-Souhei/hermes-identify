@@ -239,10 +239,15 @@ export default function CataloguePage() {
         </div>
       )}
 
+      {/* Graph — always mounted once topics are ready so Three.js state survives tab switches */}
+      {topics.length > 0 && !loading && (
+        <div className={view === 'graph' ? '' : 'hidden'}>
+          <CatalogueGraph topics={topics} />
+        </div>
+      )}
+
       {/* Content */}
-      {view === 'graph' && topics.length > 0 ? (
-        <CatalogueGraph topics={topics} />
-      ) : loading ? (
+      {view !== 'graph' && (loading ? (
         <div className="space-y-2">
           <SkeletonRow />
           <SkeletonRow />
@@ -425,7 +430,7 @@ export default function CataloguePage() {
             )
           })}
         </div>
-      )}
+      ))}
     </main>
   )
 }
