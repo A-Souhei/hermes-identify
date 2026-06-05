@@ -414,6 +414,14 @@ function IngestTab({
   // Keep imageQueueRef in sync for unmount cleanup
   useEffect(() => { imageQueueRef.current = imageQueue }, [imageQueue])
 
+  // BroadcastChannel — notify catalogue when a topic receives new content
+  const broadcastRef = useRef<BroadcastChannel | null>(null)
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return
+    broadcastRef.current = new BroadcastChannel('hermes-ingest')
+    return () => { broadcastRef.current?.close(); broadcastRef.current = null }
+  }, [])
+
   // Auto-process poll handles — cleared on unmount
   const autoPollsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
   const ingestMountedRef = useRef(true)
@@ -485,6 +493,7 @@ function IngestTab({
         await api.topics.ingestFile(topicId, item.file)
         setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onDocumentIngested()
+        broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
         runAutoProcess(item.id, setFileQueue)
       } catch (err) {
         setFileQueue(prev => prev.map(i => i.id === item.id
@@ -528,6 +537,7 @@ function IngestTab({
         await api.topics.ingestUrl(topicId, item.url)
         setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onDocumentIngested()
+        broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
         runAutoProcess(item.id, setUrlQueue)
       } catch (err) {
         setUrlQueue(prev => prev.map(i => i.id === item.id
@@ -569,6 +579,7 @@ function IngestTab({
         await api.topics.ingestImage(topicId, item.file)
         setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onImageIngested()
+        broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
         runAutoProcess(item.id, setImageQueue)
       } catch (err) {
         setImageQueue(prev => prev.map(i => i.id === item.id
