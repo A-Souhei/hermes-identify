@@ -387,6 +387,7 @@ function IngestTab({
   // File queue
   const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([])
   const [fileRunning, setFileRunning] = useState(false)
+  const fileRunningRef = useRef(false)
   const [docDragOver, setDocDragOver] = useState(false)
   const docInputRef = useRef<HTMLInputElement>(null)
 
@@ -394,23 +395,36 @@ function IngestTab({
   const [urlQueue, setUrlQueue] = useState<UrlQueueItem[]>([])
   const [urlInput, setUrlInput] = useState('')
   const [urlRunning, setUrlRunning] = useState(false)
+  const urlRunningRef = useRef(false)
   const [urlInputError, setUrlInputError] = useState<string | null>(null)
 
   // Image queue
   const [imageQueue, setImageQueue] = useState<ImageQueueItem[]>([])
+  const imageQueueRef = useRef<ImageQueueItem[]>([])
   const [imageDragOver, setImgDragOver] = useState(false)
   const imgInputRef = useRef<HTMLInputElement>(null)
   const [imageRunning, setImageRunning] = useState(false)
+  const imageRunningRef = useRef(false)
 
   // Auto-process
   const [autoProcess, setAutoProcess] = useState(true)
+  const autoProcessRef = useRef(true)
+  useEffect(() => { autoProcessRef.current = autoProcess }, [autoProcess])
 
-  // Revoke all image preview URLs on unmount
+  // Keep imageQueueRef in sync for unmount cleanup
+  useEffect(() => { imageQueueRef.current = imageQueue }, [imageQueue])
+
+  // Auto-process poll handles — cleared on unmount
+  const autoPollsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
+  const ingestMountedRef = useRef(true)
+
+  // Revoke all image preview URLs and clear polls on unmount
   useEffect(() => {
     return () => {
-      imageQueue.forEach(i => URL.revokeObjectURL(i.previewUrl))
+      ingestMountedRef.current = false
+      imageQueueRef.current.forEach(i => URL.revokeObjectURL(i.previewUrl))
+      autoPollsRef.current.forEach(clearInterval)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Auto-process helper ──────────────────────────────────────────────────
@@ -419,21 +433,25 @@ function IngestTab({
     itemId: number,
     setter: React.Dispatch<React.SetStateAction<T[]>>
   ) {
-    if (!autoProcess) return
+    if (!autoProcessRef.current) return
     try {
       const job = await api.topics.process(topicId)
+      if (!ingestMountedRef.current) return
       setter(prev => prev.map(i => i.id === itemId ? { ...i, jobId: job.id, jobStatus: job.status } : i))
       const poll = setInterval(async () => {
         try {
           const updated = await api.jobs.get(job.id)
+          if (!ingestMountedRef.current) { clearInterval(poll); autoPollsRef.current.delete(poll); return }
           setter(prev => prev.map(i => i.id === itemId ? { ...i, jobStatus: updated.status } : i))
           if (updated.status === 'completed' || updated.status === 'failed') {
             clearInterval(poll)
+            autoPollsRef.current.delete(poll)
           }
-        } catch { clearInterval(poll) }
+        } catch { clearInterval(poll); autoPollsRef.current.delete(poll) }
       }, 3000)
+      autoPollsRef.current.add(poll)
     } catch {
-      // silent — pipeline failure doesn't block queue
+      addToast('Auto-process failed to start', 'error')
     }
   }
 
@@ -457,7 +475,8 @@ function IngestTab({
   }
 
   async function runFileQueue() {
-    if (fileRunning) return
+    if (fileRunningRef.current) return
+    fileRunningRef.current = true
     setFileRunning(true)
     const pending = fileQueue.filter(i => i.status === 'pending')
     for (const item of pending) {
@@ -473,6 +492,7 @@ function IngestTab({
           : i))
       }
     }
+    fileRunningRef.current = false
     setFileRunning(false)
   }
 
@@ -488,13 +508,18 @@ function IngestTab({
       setUrlInputError('Enter a valid http:// or https:// URL')
       return
     }
+    if (urlQueue.some(i => i.url === trimmed)) {
+      setUrlInputError('URL already in queue')
+      return
+    }
     setUrlInputError(null)
     setUrlQueue(prev => [...prev, { id: ++_queueId, url: trimmed, status: 'pending' }])
     setUrlInput('')
   }
 
   async function runUrlQueue() {
-    if (urlRunning) return
+    if (urlRunningRef.current) return
+    urlRunningRef.current = true
     setUrlRunning(true)
     const pending = urlQueue.filter(i => i.status === 'pending')
     for (const item of pending) {
@@ -510,6 +535,7 @@ function IngestTab({
           : i))
       }
     }
+    urlRunningRef.current = false
     setUrlRunning(false)
   }
 
@@ -533,7 +559,8 @@ function IngestTab({
   }
 
   async function runImageQueue() {
-    if (imageRunning) return
+    if (imageRunningRef.current) return
+    imageRunningRef.current = true
     setImageRunning(true)
     const pending = imageQueue.filter(i => i.status === 'pending')
     for (const item of pending) {
@@ -549,6 +576,7 @@ function IngestTab({
           : i))
       }
     }
+    imageRunningRef.current = false
     setImageRunning(false)
   }
 
@@ -635,7 +663,7 @@ function IngestTab({
                 <QueueStatusIcon status={item.status} />
                 <span className="flex-1 truncate text-ink-100 min-w-0">{item.file.name}</span>
                 <span className="text-xs text-ink-500 shrink-0">{formatBytes(item.file.size)}</span>
-                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate">{item.error}</span>}
+                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
                 {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
                 <button
                   onClick={() => setFileQueue(prev => prev.filter(i => i.id !== item.id))}
@@ -711,7 +739,7 @@ function IngestTab({
               <div key={item.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-900 text-sm">
                 <QueueStatusIcon status={item.status} />
                 <span className="flex-1 truncate text-ink-100 min-w-0 max-w-xs" title={item.url}>{item.url}</span>
-                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate">{item.error}</span>}
+                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
                 {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
                 <button
                   onClick={() => setUrlQueue(prev => prev.filter(i => i.id !== item.id))}
@@ -804,7 +832,7 @@ function IngestTab({
                   <QueueStatusIcon status={item.status} />
                   {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
                 </div>
-                {item.error && <span className="text-xs text-rose-400 text-center">{item.error}</span>}
+                {item.error && <span className="text-xs text-rose-400 text-center" title={item.error}>{item.error}</span>}
                 <button
                   onClick={() => removeImageFromQueue(item.id)}
                   disabled={item.status === 'uploading'}
