@@ -167,7 +167,7 @@ class TestIngestContext:
         )
         assert r.status_code == 422
 
-    async def test_image_preserves_llm_description(self, client: AsyncClient):
+    async def test_image_context_stored_as_description(self, client: AsyncClient):
         tid = (await client.post("/topics", json={"name": "IC"})).json()["id"]
         with patch("storage.upload_file", new_callable=AsyncMock), \
              patch("embedder.describe_image", new_callable=AsyncMock, return_value="AI desc"), \
@@ -179,26 +179,21 @@ class TestIngestContext:
                 data={"context": "image notes"},
             )
         assert r.status_code == 201
-        assert r.json()["description"] == "AI desc"
+        assert r.json()["description"] == "image notes"
 
-    async def test_image_no_context(self, client: AsyncClient):
+    async def test_image_no_context_returns_422(self, client: AsyncClient):
         tid = (await client.post("/topics", json={"name": "INC"})).json()["id"]
-        with patch("storage.upload_file", new_callable=AsyncMock), \
-             patch("embedder.describe_image", new_callable=AsyncMock, return_value="Only AI"), \
-             patch("embedder.embed_texts", new_callable=AsyncMock, return_value=[[0.1] * 10]), \
-             patch("embedder.upsert_to_qdrant", new_callable=AsyncMock):
-            r = await client.post(
-                f"/topics/{tid}/ingest/image",
-                files={"file": ("photo.png", b"\x89PNG\r\n", "image/png")},
-            )
-        assert r.status_code == 201
-        assert r.json()["description"] == "Only AI"
+        r = await client.post(
+            f"/topics/{tid}/ingest/image",
+            files={"file": ("photo.png", b"\x89PNG\r\n", "image/png")},
+        )
+        assert r.status_code == 422
 
     async def test_image_context_too_long_422(self, client: AsyncClient):
         tid = (await client.post("/topics", json={"name": "ICL"})).json()["id"]
         r = await client.post(
             f"/topics/{tid}/ingest/image",
             files={"file": ("photo.png", b"\x89PNG\r\n", "image/png")},
-            data={"context": "z" * 1001},
+            data={"context": "z" * 5001},
         )
         assert r.status_code == 422
