@@ -42,8 +42,8 @@ chunk_subtopics = Table(
 topic_links = Table(
     "topic_links",
     Base.metadata,
-    Column("topic_id_a", String, ForeignKey("topics.id"), primary_key=True),
-    Column("topic_id_b", String, ForeignKey("topics.id"), primary_key=True),
+    Column("topic_id_a", String, ForeignKey("topics.id", ondelete="CASCADE"), primary_key=True),
+    Column("topic_id_b", String, ForeignKey("topics.id", ondelete="CASCADE"), primary_key=True),
 )
 
 
