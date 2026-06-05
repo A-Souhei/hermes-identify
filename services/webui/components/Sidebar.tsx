@@ -35,16 +35,20 @@ export function Sidebar({ active }: { active: string }) {
   const [version, setVersion] = useState<string | null>(null)
 
   useEffect(() => {
+    let ignore = false
     fetch('/api/entifier/health')
       .then((r) => {
         if (!r.ok) throw new Error('not ok')
         return r.json() as Promise<HealthData>
       })
       .then((data) => {
-        setVersion(data.version ?? null)
-        setHealth('ok')
+        if (!ignore) {
+          setVersion(data.version ?? null)
+          setHealth('ok')
+        }
       })
-      .catch(() => setHealth('error'))
+      .catch(() => { if (!ignore) setHealth('error') })
+    return () => { ignore = true }
   }, [])
 
   return (

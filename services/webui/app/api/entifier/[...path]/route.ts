@@ -9,8 +9,12 @@ async function handler(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   const { path } = await ctx.params
   const upstream = buildUpstreamUrl(ENTIFIER, path, req.nextUrl.search)
 
-  const headers = new Headers(req.headers)
-  headers.delete('host')
+  // Only forward a safe subset of request headers upstream
+  const forwardHeaders = new Headers()
+  for (const key of ['content-type', 'accept', 'accept-language'] as const) {
+    const val = req.headers.get(key)
+    if (val !== null) forwardHeaders.set(key, val)
+  }
 
   const body =
     req.method !== 'GET' && req.method !== 'HEAD'
@@ -20,12 +24,24 @@ async function handler(req: NextRequest, ctx: Ctx): Promise<NextResponse> {
   try {
     const res = await fetch(upstream, {
       method: req.method,
-      headers,
+      headers: forwardHeaders,
       body,
     })
 
-    const resHeaders = new Headers(res.headers)
-    resHeaders.delete('content-encoding')
+    // For any non-ok upstream response, return a generic error (never stream the upstream body)
+    if (!res.ok) {
+      return NextResponse.json(
+        { error: res.statusText || 'upstream error' },
+        { status: res.status },
+      )
+    }
+
+    // Only forward a safe subset of response headers to the client
+    const resHeaders = new Headers()
+    for (const key of ['content-type', 'cache-control', 'etag'] as const) {
+      const val = res.headers.get(key)
+      if (val !== null) resHeaders.set(key, val)
+    }
 
     return new NextResponse(res.body, {
       status: res.status,

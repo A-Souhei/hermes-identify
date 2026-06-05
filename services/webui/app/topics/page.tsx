@@ -1,11 +1,14 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { api, Topic } from '@/lib/api'
 
 function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const diff = Date.now() - t
+  if (diff < 0) return 'just now'
   const minutes = Math.floor(diff / 60_000)
   if (minutes < 2) return 'just now'
   if (minutes < 60) return `${minutes} minutes ago`
@@ -31,7 +34,7 @@ function TopicCard({ topic }: { topic: Topic }) {
       <div className="flex items-center justify-between gap-2 pt-1 border-t border-ink-700/60">
         <div className="flex items-center gap-2 min-w-0">
           <Link
-            href={`/topics/${topic.id}`}
+            href={`/topics/${encodeURIComponent(topic.id)}`}
             className="btn-ghost text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1"
           >
             Browse
@@ -72,6 +75,7 @@ interface Toast {
 export default function TopicsPage() {
   const [topics, setTopics] = useState<Topic[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = React.useState<string | null>(null)
   const [showModal, setShowModal] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -85,17 +89,24 @@ export default function TopicsPage() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3500)
   }
 
-  const loadTopics = () => {
+  async function loadTopics(signal?: AbortSignal) {
     setLoading(true)
-    api.topics
-      .list()
-      .then(setTopics)
-      .catch(() => addToast('Failed to load topics', 'error'))
-      .finally(() => setLoading(false))
+    setLoadError(null)
+    try {
+      const data = await api.topics.list()
+      setTopics(data)
+    } catch (err) {
+      if (signal?.aborted) return
+      setLoadError(err instanceof Error ? err.message : 'Failed to load topics')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
-    loadTopics()
+    const controller = new AbortController()
+    loadTopics(controller.signal)
+    return () => controller.abort()
   }, [])
 
   const openModal = () => {
@@ -111,6 +122,7 @@ export default function TopicsPage() {
   }
 
   const handleCreate = async () => {
+    if (creating) return
     if (!name.trim()) return
     setCreating(true)
     setModalError(null)
@@ -166,6 +178,11 @@ export default function TopicsPage() {
           <SkeletonCard />
           <SkeletonCard />
         </div>
+      ) : !loading && loadError ? (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-center">
+          <p className="text-sm text-rose-300 mb-3">{loadError}</p>
+          <button className="btn-secondary text-xs" onClick={() => loadTopics()}>Retry</button>
+        </div>
       ) : topics.length === 0 ? (
         <div className="empty flex flex-col items-center gap-4">
           <svg className="w-10 h-10 text-ink-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -213,6 +230,7 @@ export default function TopicsPage() {
                   placeholder="e.g. Climate Research"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  maxLength={200}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
                   autoFocus
                   disabled={creating}
@@ -227,6 +245,7 @@ export default function TopicsPage() {
                   placeholder="What is this topic about?"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
+                  maxLength={2000}
                   disabled={creating}
                 />
               </div>
