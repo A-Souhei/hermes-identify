@@ -128,6 +128,14 @@ export interface SearchResponse {
   images: ImageSearchHit[]
 }
 
+export interface SmartIngestResult {
+  topic_id: string
+  topic_name: string
+  was_created: boolean
+  document_id: string
+  filename: string
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -178,6 +186,14 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ query, limit: Math.min(Math.max(1, limit), 50) }),
       }),
+  },
+  smartIngest: {
+    file: (file: File, context?: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      if (context) fd.append('context', context)
+      return upload<SmartIngestResult>('/smart-ingest/file', fd)
+    },
   },
   jobs: {
     get: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
