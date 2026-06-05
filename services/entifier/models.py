@@ -382,3 +382,69 @@ class SmartIngestResult(BaseModel):
     was_created: bool
     document_id: str
     filename: str
+
+
+# ── Dossier models ────────────────────────────────────────────────────────────
+
+class Dossier(Base):
+    __tablename__ = "dossiers"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    blocks: Mapped[list["DossierBlock"]] = relationship(
+        back_populates="dossier", cascade="all, delete-orphan", order_by="DossierBlock.order_index"
+    )
+
+
+class DossierBlock(Base):
+    __tablename__ = "dossier_blocks"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
+    dossier_id: Mapped[str] = mapped_column(String, ForeignKey("dossiers.id"), nullable=False)
+    block_type: Mapped[str] = mapped_column(String, nullable=False)
+    ref_id: Mapped[str] = mapped_column(String, nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+    dossier: Mapped["Dossier"] = relationship(back_populates="blocks")
+
+
+class DossierBlockResolved(BaseModel):
+    id: str
+    block_type: str
+    ref_id: str
+    order_index: int
+    label: str
+    meta: dict
+
+
+class DossierOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DossierDetail(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    blocks: list[DossierBlockResolved]
+
+
+class DossierCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
+class DossierPatch(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+
+
+class DossierBlockCreate(BaseModel):
+    block_type: str
+    ref_id: str
+    order_index: int = Field(0, ge=0)
+
+
+class DossierBlockPatch(BaseModel):
+    order_index: int = Field(..., ge=0)

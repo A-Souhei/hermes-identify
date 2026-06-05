@@ -254,12 +254,13 @@ class TestIngestImage:
 
         r = await client.post(
             f"/topics/{tid}/ingest/image",
+            data={"context": "A bar chart showing quarterly revenue."},
             files={"file": ("chart.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
         )
         assert r.status_code == 201
         data = r.json()
         assert data["filename"] == "chart.png"
-        assert data["description"] == DUMMY_DESCRIPTION
+        assert data["description"] == "A bar chart showing quarterly revenue."
 
     async def test_unsupported_image_format_returns_422(self, client: AsyncClient, mock_externals):
         topic_r = await client.post("/topics", json={"name": "T"})
@@ -274,6 +275,7 @@ class TestIngestImage:
     async def test_ingest_image_topic_not_found(self, client: AsyncClient, mock_externals):
         r = await client.post(
             "/topics/nonexistent/ingest/image",
+            data={"context": "Some context."},
             files={"file": ("img.png", b"content", "image/png")},
         )
         assert r.status_code == 404
@@ -322,6 +324,7 @@ class TestListImages:
         tid = topic_r.json()["id"]
         await client.post(
             f"/topics/{tid}/ingest/image",
+            data={"context": "A chart showing data."},
             files={"file": ("img.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
         )
         r = await client.get(f"/topics/{tid}/images")
@@ -341,6 +344,7 @@ class TestGetImageContent:
         tid = topic_r.json()["id"]
         img_r = await client.post(
             f"/topics/{tid}/ingest/image",
+            data={"context": "A photo of the product."},
             files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
         )
         img_id = img_r.json()["id"]

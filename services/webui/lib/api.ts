@@ -18,6 +18,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       : await res.text().catch(() => res.statusText)
     throw new Error(`${res.status}: ${text}`)
   }
+  if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
@@ -136,6 +137,26 @@ export interface SmartIngestResult {
   filename: string
 }
 
+export interface DossierBlockResolved {
+  id: string
+  block_type: 'topic' | 'subtopic' | 'section' | 'entity' | 'image'
+  ref_id: string
+  order_index: number
+  label: string
+  meta: Record<string, unknown>
+}
+
+export interface DossierOut {
+  id: string
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DossierDetail extends DossierOut {
+  blocks: DossierBlockResolved[]
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -200,5 +221,35 @@ export const api = {
   },
   images: {
     contentUrl: (id: string) => `/api/entifier/images/${encodeURIComponent(id)}/content`,
+  },
+  dossiers: {
+    list: () => request<DossierOut[]>('/dossiers'),
+    create: (name: string) =>
+      request<DossierOut>('/dossiers', {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      }),
+    get: (id: string) => request<DossierDetail>(`/dossiers/${encodeURIComponent(id)}`),
+    rename: (id: string, name: string) =>
+      request<DossierOut>(`/dossiers/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name }),
+      }),
+    remove: (id: string) =>
+      request<void>(`/dossiers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    addBlock: (id: string, payload: { block_type: string; ref_id: string; order_index: number }) =>
+      request<DossierBlockResolved>(`/dossiers/${encodeURIComponent(id)}/blocks`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    removeBlock: (id: string, blockId: string) =>
+      request<void>(`/dossiers/${encodeURIComponent(id)}/blocks/${encodeURIComponent(blockId)}`, {
+        method: 'DELETE',
+      }),
+    reorderBlock: (id: string, blockId: string, order_index: number) =>
+      request<DossierBlockResolved>(
+        `/dossiers/${encodeURIComponent(id)}/blocks/${encodeURIComponent(blockId)}`,
+        { method: 'PATCH', body: JSON.stringify({ order_index }) }
+      ),
   },
 }

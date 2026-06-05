@@ -14,10 +14,20 @@ import indexer as indexer_mod
 import storage
 from db import SessionLocal, create_tables, get_session, run_migrations
 from models import (
+    _now,
     Chunk,
     ChunkSummary,
     Document,
     DocumentOut,
+    Dossier,
+    DossierBlock,
+    DossierBlockCreate,
+    DossierBlockPatch,
+    DossierBlockResolved,
+    DossierCreate,
+    DossierDetail,
+    DossierOut,
+    DossierPatch,
     Entity,
     EntityDetailOut,
     EntityIndexItem,
@@ -289,9 +299,12 @@ async def ingest_url(topic_id: str, body: IngestUrlRequest, db: DB):
 
 
 @app.post("/topics/{topic_id}/ingest/image", response_model=ImageOut, status_code=201)
-async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
-    if context and len(context) > 1000:
-        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
+async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...), context: str = Form(...)):
+    context = context.strip()
+    if not context:
+        raise HTTPException(status_code=422, detail="context is required")
+    if len(context) > 5000:
+        raise HTTPException(status_code=422, detail="context must be 5000 characters or fewer")
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
@@ -307,6 +320,7 @@ async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...), cont
         topic_id=topic_id,
         filename=file.filename or "image",
         file_path="",
+        description=context,
     )
     db.add(img)
     await db.flush()
@@ -317,11 +331,27 @@ async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...), cont
     img.minio_key = minio_key
     img.file_path = minio_key
 
-    description = await embedder.describe_image(content, content_type)
-    img.description = description or None
-    embed_source = f"[User context: {context}]\n\n{description or ''}".strip() if context else description
+    ai_description = await embedder.describe_image(content, content_type)
+    embed_source = f"{context}\n\n{ai_description or ''}".strip()
+
+    # Ingest context text as a searchable document
+    doc = Document(
+        topic_id=topic_id,
+        source_type=SourceType.FILE,
+        source_ref=img.id,
+        filename=safe_img_name,
+        context=context,
+    )
+    db.add(doc)
+    await db.flush()
+
+    doc_key = f"{topic_id}/documents/{doc.id}/{safe_img_name}.md"
+    await storage.upload_file(doc_key, context.encode(), "text/markdown")
+    doc.minio_key = doc_key
 
     await db.commit()
+
+    await _store_chunks(context, doc.id, topic_id, db)
 
     if embed_source:
         vectors = await embedder.embed_texts([embed_source])
@@ -748,3 +778,166 @@ async def _store_chunks(text: str, doc_id: str, topic_id: str, db: AsyncSession,
         chunk.qdrant_id = chunk.id
 
     await db.commit()
+
+
+# ── Dossiers ──────────────────────────────────────────────────────────────────
+
+_VALID_BLOCK_TYPES = {"subtopic", "section", "entity", "image"}
+
+
+async def _resolve_block(block: DossierBlock, db: AsyncSession) -> DossierBlockResolved:
+    bt = block.block_type
+    ref_id = block.ref_id
+    label = "(deleted)"
+    meta: dict = {}
+
+    if bt == "subtopic":
+        obj = await db.get(SubTopic, ref_id)
+        if obj:
+            label = obj.name
+            meta = {"description": obj.description, "topic_id": obj.topic_id}
+    elif bt == "section":
+        obj = await db.get(Section, ref_id)
+        if obj:
+            label = obj.name
+            meta = {
+                "description": obj.description,
+                "subtopic_id": obj.subtopic_id,
+                "topic_id": obj.topic_id,
+                "order_index": obj.order_index,
+            }
+    elif bt == "entity":
+        obj = await db.get(Entity, ref_id)
+        if obj:
+            label = obj.name
+            meta = {
+                "description": obj.description,
+                "entity_type": obj.entity_type.value if obj.entity_type is not None else None,
+                "subtopic_id": obj.subtopic_id,
+                "section_id": obj.section_id,
+            }
+    elif bt == "image":
+        obj = await db.get(Image, ref_id)
+        if obj:
+            label = obj.filename
+            meta = {"description": obj.description, "minio_key": obj.minio_key}
+
+    return DossierBlockResolved(
+        id=block.id,
+        block_type=bt,
+        ref_id=ref_id,
+        order_index=block.order_index,
+        label=label,
+        meta=meta,
+    )
+
+
+@app.get("/dossiers", response_model=list[DossierOut])
+async def list_dossiers(db: DB):
+    result = await db.execute(select(Dossier).order_by(Dossier.created_at.desc()))
+    return result.scalars().all()
+
+
+@app.post("/dossiers", response_model=DossierOut, status_code=201)
+async def create_dossier(body: DossierCreate, db: DB):
+    dossier = Dossier(name=body.name)
+    db.add(dossier)
+    await db.commit()
+    await db.refresh(dossier)
+    return dossier
+
+
+@app.get("/dossiers/{dossier_id}", response_model=DossierDetail)
+async def get_dossier(dossier_id: str, db: DB):
+    result = await db.execute(
+        select(Dossier)
+        .where(Dossier.id == dossier_id)
+        .options(selectinload(Dossier.blocks))
+    )
+    dossier = result.scalar_one_or_none()
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    blocks = [await _resolve_block(b, db) for b in dossier.blocks]
+    return DossierDetail(
+        id=dossier.id,
+        name=dossier.name,
+        created_at=dossier.created_at,
+        updated_at=dossier.updated_at,
+        blocks=blocks,
+    )
+
+
+@app.patch("/dossiers/{dossier_id}", response_model=DossierOut)
+async def patch_dossier(dossier_id: str, body: DossierPatch, db: DB):
+    dossier = await db.get(Dossier, dossier_id)
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    if body.name is not None:
+        dossier.name = body.name
+    dossier.updated_at = _now()
+    await db.commit()
+    await db.refresh(dossier)
+    return dossier
+
+
+@app.delete("/dossiers/{dossier_id}", status_code=204)
+async def delete_dossier(dossier_id: str, db: DB):
+    dossier = await db.get(Dossier, dossier_id)
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    await db.delete(dossier)
+    await db.commit()
+
+
+@app.post("/dossiers/{dossier_id}/blocks", response_model=DossierBlockResolved, status_code=201)
+async def add_dossier_block(dossier_id: str, body: DossierBlockCreate, db: DB):
+    if body.block_type not in _VALID_BLOCK_TYPES:
+        raise HTTPException(status_code=422, detail=f"block_type must be one of {sorted(_VALID_BLOCK_TYPES)}")
+    dossier = await db.get(Dossier, dossier_id)
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    existing = await db.execute(
+        select(DossierBlock).where(
+            DossierBlock.dossier_id == dossier_id,
+            DossierBlock.ref_id == body.ref_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="element already in dossier")
+    block = DossierBlock(
+        dossier_id=dossier_id,
+        block_type=body.block_type,
+        ref_id=body.ref_id,
+        order_index=body.order_index,
+    )
+    db.add(block)
+    dossier.updated_at = _now()
+    await db.commit()
+    await db.refresh(block)
+    return await _resolve_block(block, db)
+
+
+@app.delete("/dossiers/{dossier_id}/blocks/{block_id}", status_code=204)
+async def remove_dossier_block(dossier_id: str, block_id: str, db: DB):
+    block = await db.get(DossierBlock, block_id)
+    if not block or block.dossier_id != dossier_id:
+        raise HTTPException(status_code=404, detail="block not found")
+    dossier = await db.get(Dossier, dossier_id)
+    if dossier:
+        dossier.updated_at = _now()
+    await db.delete(block)
+    await db.commit()
+
+
+@app.patch("/dossiers/{dossier_id}/blocks/{block_id}", response_model=DossierBlockResolved)
+async def patch_dossier_block(dossier_id: str, block_id: str, body: DossierBlockPatch, db: DB):
+    block = await db.get(DossierBlock, block_id)
+    if not block or block.dossier_id != dossier_id:
+        raise HTTPException(status_code=404, detail="block not found")
+    block.order_index = body.order_index
+    dossier = await db.get(Dossier, dossier_id)
+    if dossier:
+        dossier.updated_at = _now()
+    await db.commit()
+    await db.refresh(block)
+    return await _resolve_block(block, db)

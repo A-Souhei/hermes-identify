@@ -39,6 +39,17 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    key: 'dossiers',
+    label: 'Dossiers',
+    href: '/dossiers',
+    icon: (
+      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z" />
+        <path d="M8 14h8M8 11h5" />
+      </svg>
+    ),
+  },
+  {
     key: 'bulk-upload',
     label: 'Bulk Upload',
     href: '/bulk-upload',
