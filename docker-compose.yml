@@ -63,7 +63,7 @@ services:
 
   webui:
     build: services/webui
-    image: hermes-docwriter-webui:latest
+    image: hermes-identify-webui:latest
     ports:
       - "32180:3000"
     environment:
