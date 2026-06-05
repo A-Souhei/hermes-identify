@@ -13,7 +13,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
+    const text = res.status >= 500
+      ? 'Server error, please try again'
+      : await res.text().catch(() => res.statusText)
     throw new Error(`${res.status}: ${text}`)
   }
   return res.json() as Promise<T>
@@ -101,7 +103,9 @@ export interface Image {
 async function upload<T>(path: string, formData: FormData): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData })
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
+    const text = res.status >= 500
+      ? 'Server error, please try again'
+      : await res.text().catch(() => res.statusText)
     throw new Error(`${res.status}: ${text}`)
   }
   return res.json() as Promise<T>
@@ -157,7 +161,7 @@ export const api = {
     search: (id: string, query: string, limit = 10) =>
       request<SearchResponse>(`/topics/${encodeURIComponent(id)}/search`, {
         method: 'POST',
-        body: JSON.stringify({ query, limit }),
+        body: JSON.stringify({ query, limit: Math.min(Math.max(1, limit), 50) }),
       }),
   },
   jobs: {

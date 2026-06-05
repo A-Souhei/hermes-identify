@@ -573,19 +573,23 @@ function SearchTab({
   const [searching, setSearching] = useState(false)
   const [results, setResults] = useState<SearchResponse | null>(null)
   const [searchError, setSearchError] = useState<string | null>(null)
+  const requestIdRef = useRef(0)
 
   async function handleSearch() {
     const trimmed = query.trim()
     if (!trimmed || searching) return
+    const reqId = ++requestIdRef.current
     setSearching(true)
     setSearchError(null)
     try {
       const data = await api.topics.search(topicId, trimmed)
+      if (reqId !== requestIdRef.current) return
       setResults(data)
     } catch (err) {
+      if (reqId !== requestIdRef.current) return
       setSearchError(err instanceof Error ? err.message : 'Search failed')
     } finally {
-      setSearching(false)
+      if (reqId === requestIdRef.current) setSearching(false)
     }
   }
 
@@ -646,7 +650,7 @@ function SearchTab({
               <div key={hit.entity.id + i} className="card p-4">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-amber-400/15 text-amber-300">
-                    {Math.round(hit.score * 100)}%
+                    {Math.round(Math.min(hit.score, 1) * 100)}%
                   </span>
                   <span className="font-semibold text-ink-50">{hit.entity.name}</span>
                   <EntityTypeBadge type={hit.entity.entity_type} />
@@ -685,7 +689,7 @@ function SearchTab({
                   {hit.image.filename}
                 </p>
                 <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-amber-400/15 text-amber-300 self-start">
-                  {Math.round(hit.score * 100)}%
+                  {Math.round(Math.min(hit.score, 1) * 100)}%
                 </span>
               </div>
             ))}
@@ -907,6 +911,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
     if (activeTab === 'search' && topicId) {
       return (
         <SearchTab
+          key={topicId}
           topicId={topicId}
           onOpenImageLightbox={(imgs, i) => {
             setLightboxImages(imgs)
