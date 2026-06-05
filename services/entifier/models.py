@@ -5,7 +5,7 @@ from typing import Optional
 
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from db import Base
 
@@ -341,7 +341,7 @@ class IngestUrlRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = Field(default=10, ge=1, le=50)
 
 
 class EntitySearchHit(BaseModel):
