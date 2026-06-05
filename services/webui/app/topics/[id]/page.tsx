@@ -4,6 +4,7 @@ import Link from 'next/link'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, Document, Entity, Image, SubTopic, TopicIndex, Topic } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
+import { Lightbox } from '@/components/Lightbox'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -251,7 +252,13 @@ function DocumentsTab({ documents }: { documents: Document[] }) {
 
 // ── Images Tab ────────────────────────────────────────────────────────────────
 
-function ImagesTab({ images }: { images: Image[] }) {
+interface ImagesTabProps {
+  images: Image[]
+  lightboxIndex: number | null
+  onOpenLightbox: (index: number) => void
+}
+
+function ImagesTab({ images, onOpenLightbox }: ImagesTabProps) {
   if (images.length === 0) {
     return (
       <p className="text-ink-500 text-sm italic py-8 text-center">No images ingested yet.</p>
@@ -260,8 +267,12 @@ function ImagesTab({ images }: { images: Image[] }) {
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-      {images.map((img) => (
-        <div key={img.id} className="card p-3 flex flex-col gap-2">
+      {images.map((img, index) => (
+        <div
+          key={img.id}
+          className="card p-3 flex flex-col gap-2 cursor-pointer"
+          onClick={() => onOpenLightbox(index)}
+        >
           <div className="w-full aspect-square bg-ink-800 rounded-lg flex items-center justify-center">
             <span className="text-2xl font-bold text-ink-500 uppercase">
               {img.filename.charAt(0)}
@@ -564,6 +575,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   const [loading, setLoading] = useState(true)
   const [activeSubtopicId, setActiveSubtopicId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('index')
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [loadError, setLoadError] = React.useState<string | null>(null)
   const [processing, setProcessing] = useState(false)
   const { toasts, addToast } = useToasts()
@@ -742,7 +754,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         )
       }
-      return <ImagesTab images={images} />
+      return <ImagesTab images={images} lightboxIndex={lightboxIndex} onOpenLightbox={(i) => setLightboxIndex(i)} />
     }
     if (activeTab === 'ingest' && topicId) {
       return (
@@ -805,7 +817,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
             {tabs.map((tab) => (
               <button
                 key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
+                onClick={() => { setActiveTab(tab.key); setLightboxIndex(null) }}
                 className={[
                   'px-4 py-3 text-sm transition-colors border-b-2',
                   activeTab === tab.key
@@ -824,6 +836,14 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         </div>
       </div>
+
+      {lightboxIndex !== null && images && (
+        <Lightbox
+          images={images}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
 
       {/* Toasts */}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">

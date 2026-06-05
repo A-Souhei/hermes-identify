@@ -137,3 +137,9 @@ describe('api.jobs', () => {
     expect(global.fetch).toHaveBeenCalledWith('/api/entifier/jobs/j1', expect.objectContaining({}))
   })
 })
+
+describe('api.images', () => {
+  it('images.contentUrl returns correct URL', () => {
+    expect(api.images.contentUrl('img-1')).toBe('/api/entifier/images/img-1/content')
+  })
+})

@@ -255,6 +255,26 @@ async def list_images(topic_id: str, db: DB):
     return result.scalars().all()
 
 
+@app.get("/images/{image_id}/content")
+async def get_image_content(image_id: str, db: DB):
+    from fastapi.responses import Response
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="image not found")
+    if not img.minio_key:
+        raise HTTPException(status_code=404, detail="image content not available")
+    content = await storage.download_file(img.minio_key)
+    suffix = Path(img.filename).suffix.lower()
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(suffix, "image/png")
+    return Response(content=content, media_type=media_type)
+
+
 # ── Background job runner ─────────────────────────────────────────────────────
 
 async def _run_process_job(job_id: str, session_factory=None) -> None:

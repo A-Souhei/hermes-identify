@@ -331,3 +331,39 @@ class TestListImages:
     async def test_topic_not_found_returns_404(self, client: AsyncClient):
         r = await client.get("/topics/nope/images")
         assert r.status_code == 404
+
+
+# ── Get image content endpoint ────────────────────────────────────────────────
+
+class TestGetImageContent:
+    async def test_returns_image_bytes(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+        img_r = await client.post(
+            f"/topics/{tid}/ingest/image",
+            files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, "image/png")},
+        )
+        img_id = img_r.json()["id"]
+        FAKE_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+
+        with patch("storage.download_file", new_callable=AsyncMock, return_value=FAKE_BYTES):
+            r = await client.get(f"/images/{img_id}/content")
+
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/png")
+        assert r.content == FAKE_BYTES
+
+    async def test_returns_404_for_unknown_image(self, client: AsyncClient):
+        r = await client.get("/images/nonexistent/content")
+        assert r.status_code == 404
+
+    async def test_returns_404_when_no_minio_key(self, client: AsyncClient, db_session):
+        from models import Image as ImageModel
+        img = ImageModel(
+            id="img-no-key", topic_id="t1",
+            filename="photo.png", file_path="",
+        )
+        db_session.add(img)
+        await db_session.commit()
+        r = await client.get("/images/img-no-key/content")
+        assert r.status_code == 404
