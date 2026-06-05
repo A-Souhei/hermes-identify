@@ -6,6 +6,7 @@ Requires: docker compose up -d and a real OPENAI_API_KEY in .env
 import asyncio
 import os
 import time
+import uuid
 
 import httpx
 import pytest
@@ -77,7 +78,6 @@ DOC_STORAGE = (
 ).encode()
 
 
-@pytest.mark.e2e
 class TestEndToEnd:
     """Full pipeline smoke-test: ingest -> process -> validate -> search."""
 
@@ -88,10 +88,11 @@ class TestEndToEnd:
             assert r.status_code == 200, f"Service not reachable: {r.text}"
 
             # 2. Create topic
+            run_id = uuid.uuid4().hex[:8]
             r = await client.post(
                 "/topics",
                 json={
-                    "name": "Renewable Energy",
+                    "name": f"Renewable Energy [{run_id}]",
                     "description": "Solar, wind and storage technologies",
                 },
             )
@@ -123,16 +124,19 @@ class TestEndToEnd:
             # 6. Poll until complete (real LLM calls -- allow up to POLL_TIMEOUT seconds)
             deadline = time.monotonic() + POLL_TIMEOUT
             job_status = None
+            job_error = None
             while time.monotonic() < deadline:
                 r = await client.get(f"/jobs/{job_id}")
                 assert r.status_code == 200
-                job_status = r.json()["status"]
+                job_data = r.json()
+                job_status = job_data["status"]
+                job_error = job_data.get("error")
                 if job_status in ("completed", "failed"):
                     break
                 await asyncio.sleep(POLL_INTERVAL)
 
             assert job_status == "completed", (
-                f"Job ended with status={job_status}. "
+                f"Job ended with status={job_status} error={job_error!r}. "
                 "Check logs: docker compose logs entifier"
             )
 
@@ -147,8 +151,9 @@ class TestEndToEnd:
             assert r.status_code == 200
             entities = r.json()
             assert len(entities) >= 1, "Expected at least one entity"
-            assert all(e["ref_id"].startswith("ENT-") for e in entities), \
+            assert all(e["ref_id"].startswith("ENT-") for e in entities), (
                 "All entities must have ENT-xxxxxx ref_id"
+            )
 
             # 9. Index has at least one section
             r = await client.get(f"/topics/{tid}/index")
