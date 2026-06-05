@@ -289,6 +289,88 @@ function ImagesTab({ images, onOpenLightbox }: ImagesTabProps) {
   )
 }
 
+// ── Queue types ───────────────────────────────────────────────────────────────
+
+type QueueItemStatus = 'pending' | 'uploading' | 'done' | 'error'
+
+interface FileQueueItem {
+  id: number
+  file: File
+  status: QueueItemStatus
+  error?: string
+  jobId?: string
+  jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+}
+
+interface UrlQueueItem {
+  id: number
+  url: string
+  status: QueueItemStatus
+  error?: string
+  jobId?: string
+  jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+}
+
+interface ImageQueueItem {
+  id: number
+  file: File
+  previewUrl: string
+  status: QueueItemStatus
+  error?: string
+  jobId?: string
+  jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+}
+
+let _queueId = 0
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// ── Queue item status icons ───────────────────────────────────────────────────
+
+function QueueStatusIcon({ status }: { status: QueueItemStatus }) {
+  if (status === 'pending') {
+    return (
+      <svg className="w-4 h-4 text-ink-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+      </svg>
+    )
+  }
+  if (status === 'uploading') {
+    return (
+      <svg className="w-4 h-4 text-amber-400 shrink-0 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M21 12a9 9 0 1 1-9-9" />
+      </svg>
+    )
+  }
+  if (status === 'done') {
+    return (
+      <svg className="w-4 h-4 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="w-4 h-4 text-rose-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  )
+}
+
+function JobStatusBadge({ jobStatus }: { jobStatus: string }) {
+  const cls =
+    jobStatus === 'completed' ? 'bg-emerald-400/15 text-emerald-300' :
+    jobStatus === 'failed'    ? 'bg-rose-400/15 text-rose-300' :
+    jobStatus === 'running'   ? 'bg-amber-400/15 text-amber-300 animate-pulse' :
+                                'bg-ink-700 text-ink-400'
+  return <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${cls}`}>{jobStatus}</span>
+}
+
 // ── Ingest Tab ────────────────────────────────────────────────────────────────
 
 function IngestTab({
@@ -302,119 +384,253 @@ function IngestTab({
   onImageIngested: () => void
   addToast: (msg: string, type: 'success' | 'error') => void
 }) {
-  const [docFile, setDocFile] = useState<File | null>(null)
-  const [docUploading, setDocUploading] = useState(false)
-  const [docError, setDocError] = useState<string | null>(null)
+  // File queue
+  const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([])
+  const [fileRunning, setFileRunning] = useState(false)
+  const fileRunningRef = useRef(false)
   const [docDragOver, setDocDragOver] = useState(false)
   const docInputRef = useRef<HTMLInputElement>(null)
 
-  const [urlValue, setUrlValue] = useState('')
-  const [urlUploading, setUrlUploading] = useState(false)
-  const [urlError, setUrlError] = useState<string | null>(null)
+  // URL queue
+  const [urlQueue, setUrlQueue] = useState<UrlQueueItem[]>([])
+  const [urlInput, setUrlInput] = useState('')
+  const [urlRunning, setUrlRunning] = useState(false)
+  const urlRunningRef = useRef(false)
+  const [urlInputError, setUrlInputError] = useState<string | null>(null)
 
-  const [imgFile, setImgFile] = useState<File | null>(null)
-  const [imgUploading, setImgUploading] = useState(false)
-  const [imgError, setImgError] = useState<string | null>(null)
-  const [imgDragOver, setImgDragOver] = useState(false)
+  // Image queue
+  const [imageQueue, setImageQueue] = useState<ImageQueueItem[]>([])
+  const imageQueueRef = useRef<ImageQueueItem[]>([])
+  const [imageDragOver, setImgDragOver] = useState(false)
   const imgInputRef = useRef<HTMLInputElement>(null)
-  const imgBlobRef = useRef<string | null>(null)
-  const [imgPreview, setImgPreview] = useState<string | null>(null)
+  const [imageRunning, setImageRunning] = useState(false)
+  const imageRunningRef = useRef(false)
 
+  // Auto-process
+  const [autoProcess, setAutoProcess] = useState(true)
+  const autoProcessRef = useRef(true)
+  useEffect(() => { autoProcessRef.current = autoProcess }, [autoProcess])
+
+  // Keep imageQueueRef in sync for unmount cleanup
+  useEffect(() => { imageQueueRef.current = imageQueue }, [imageQueue])
+
+  // Auto-process poll handles — cleared on unmount
+  const autoPollsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
+  const ingestMountedRef = useRef(true)
+
+  // Revoke all image preview URLs and clear polls on unmount
   useEffect(() => {
     return () => {
-      if (imgBlobRef.current) URL.revokeObjectURL(imgBlobRef.current)
+      ingestMountedRef.current = false
+      imageQueueRef.current.forEach(i => URL.revokeObjectURL(i.previewUrl))
+      autoPollsRef.current.forEach(clearInterval)
     }
   }, [])
 
-  function setImgFileWithPreview(file: File | null) {
-    if (imgBlobRef.current) {
-      URL.revokeObjectURL(imgBlobRef.current)
-      imgBlobRef.current = null
-    }
-    setImgFile(file)
-    if (file) {
-      const url = URL.createObjectURL(file)
-      imgBlobRef.current = url
-      setImgPreview(url)
-    } else {
-      setImgPreview(null)
-    }
-  }
+  // ── Auto-process helper ──────────────────────────────────────────────────
 
-  async function handleDocSubmit() {
-    if (!docFile) return
-    if (docFile.size > MAX_DOC_BYTES) { setDocError('File exceeds 25 MB limit'); return }
-    setDocUploading(true)
-    setDocError(null)
+  async function runAutoProcess<T extends { id: number; jobId?: string; jobStatus?: string }>(
+    itemId: number,
+    setter: React.Dispatch<React.SetStateAction<T[]>>
+  ) {
+    if (!autoProcessRef.current) return
     try {
-      await api.topics.ingestFile(topicId, docFile)
-      addToast('Document ingested', 'success')
-      setDocFile(null)
-      onDocumentIngested()
-    } catch (err) {
-      setDocError(err instanceof Error ? err.message : 'Upload failed')
-    } finally {
-      setDocUploading(false)
+      const job = await api.topics.process(topicId)
+      if (!ingestMountedRef.current) return
+      setter(prev => prev.map(i => i.id === itemId ? { ...i, jobId: job.id, jobStatus: job.status } : i))
+      const poll = setInterval(async () => {
+        try {
+          const updated = await api.jobs.get(job.id)
+          if (!ingestMountedRef.current) { clearInterval(poll); autoPollsRef.current.delete(poll); return }
+          setter(prev => prev.map(i => i.id === itemId ? { ...i, jobStatus: updated.status } : i))
+          if (updated.status === 'completed' || updated.status === 'failed') {
+            clearInterval(poll)
+            autoPollsRef.current.delete(poll)
+          }
+        } catch { clearInterval(poll); autoPollsRef.current.delete(poll) }
+      }, 3000)
+      autoPollsRef.current.add(poll)
+    } catch {
+      addToast('Auto-process failed to start', 'error')
     }
   }
 
-  async function handleUrlSubmit() {
-    const trimmed = urlValue.trim()
+  // ── File queue ───────────────────────────────────────────────────────────
+
+  function addFilesToQueue(files: FileList | File[]) {
+    const items: FileQueueItem[] = []
+    for (const file of Array.from(files)) {
+      const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+      if (!DOC_EXTS.has(ext)) {
+        addToast(`Skipped ${file.name}: unsupported format`, 'error')
+        continue
+      }
+      if (file.size > MAX_DOC_BYTES) {
+        addToast(`Skipped ${file.name}: exceeds 25 MB limit`, 'error')
+        continue
+      }
+      items.push({ id: ++_queueId, file, status: 'pending' })
+    }
+    if (items.length > 0) setFileQueue(prev => [...prev, ...items])
+  }
+
+  async function runFileQueue() {
+    if (fileRunningRef.current) return
+    fileRunningRef.current = true
+    setFileRunning(true)
+    const pending = fileQueue.filter(i => i.status === 'pending')
+    for (const item of pending) {
+      setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
+      try {
+        await api.topics.ingestFile(topicId, item.file)
+        setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
+        onDocumentIngested()
+        runAutoProcess(item.id, setFileQueue)
+      } catch (err) {
+        setFileQueue(prev => prev.map(i => i.id === item.id
+          ? { ...i, status: 'error', error: err instanceof Error ? err.message : 'Upload failed' }
+          : i))
+      }
+    }
+    fileRunningRef.current = false
+    setFileRunning(false)
+  }
+
+  // ── URL queue ────────────────────────────────────────────────────────────
+
+  function addUrlToQueue() {
+    const trimmed = urlInput.trim()
     if (!trimmed) return
     try {
       const parsed = new URL(trimmed)
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error()
     } catch {
-      setUrlError('Enter a valid http:// or https:// URL')
+      setUrlInputError('Enter a valid http:// or https:// URL')
       return
     }
-    setUrlUploading(true)
-    setUrlError(null)
-    try {
-      await api.topics.ingestUrl(topicId, urlValue.trim())
-      addToast('URL ingested', 'success')
-      setUrlValue('')
-      onDocumentIngested()
-    } catch (err) {
-      setUrlError(err instanceof Error ? err.message : 'Ingest failed')
-    } finally {
-      setUrlUploading(false)
+    if (urlQueue.some(i => i.url === trimmed)) {
+      setUrlInputError('URL already in queue')
+      return
     }
+    setUrlInputError(null)
+    setUrlQueue(prev => [...prev, { id: ++_queueId, url: trimmed, status: 'pending' }])
+    setUrlInput('')
   }
 
-  async function handleImgSubmit() {
-    if (!imgFile) return
-    if (imgFile.size > MAX_IMG_BYTES) { setImgError('File exceeds 10 MB limit'); return }
-    setImgUploading(true)
-    setImgError(null)
-    try {
-      await api.topics.ingestImage(topicId, imgFile)
-      addToast('Image uploaded', 'success')
-      setImgFileWithPreview(null)
-      onImageIngested()
-    } catch (err) {
-      setImgError(err instanceof Error ? err.message : 'Upload failed')
-    } finally {
-      setImgUploading(false)
+  async function runUrlQueue() {
+    if (urlRunningRef.current) return
+    urlRunningRef.current = true
+    setUrlRunning(true)
+    const pending = urlQueue.filter(i => i.status === 'pending')
+    for (const item of pending) {
+      setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
+      try {
+        await api.topics.ingestUrl(topicId, item.url)
+        setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
+        onDocumentIngested()
+        runAutoProcess(item.id, setUrlQueue)
+      } catch (err) {
+        setUrlQueue(prev => prev.map(i => i.id === item.id
+          ? { ...i, status: 'error', error: err instanceof Error ? err.message : 'Ingest failed' }
+          : i))
+      }
     }
+    urlRunningRef.current = false
+    setUrlRunning(false)
   }
+
+  // ── Image queue ──────────────────────────────────────────────────────────
+
+  function addImagesToQueue(files: FileList | File[]) {
+    const items: ImageQueueItem[] = []
+    for (const file of Array.from(files)) {
+      const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+      if (!IMG_EXTS.has(ext)) {
+        addToast(`Skipped ${file.name}: unsupported format`, 'error')
+        continue
+      }
+      if (file.size > MAX_IMG_BYTES) {
+        addToast(`Skipped ${file.name}: exceeds 10 MB limit`, 'error')
+        continue
+      }
+      items.push({ id: ++_queueId, file, previewUrl: URL.createObjectURL(file), status: 'pending' })
+    }
+    if (items.length > 0) setImageQueue(prev => [...prev, ...items])
+  }
+
+  async function runImageQueue() {
+    if (imageRunningRef.current) return
+    imageRunningRef.current = true
+    setImageRunning(true)
+    const pending = imageQueue.filter(i => i.status === 'pending')
+    for (const item of pending) {
+      setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
+      try {
+        await api.topics.ingestImage(topicId, item.file)
+        setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
+        onImageIngested()
+        runAutoProcess(item.id, setImageQueue)
+      } catch (err) {
+        setImageQueue(prev => prev.map(i => i.id === item.id
+          ? { ...i, status: 'error', error: err instanceof Error ? err.message : 'Upload failed' }
+          : i))
+      }
+    }
+    imageRunningRef.current = false
+    setImageRunning(false)
+  }
+
+  function removeImageFromQueue(id: number) {
+    setImageQueue(prev => {
+      const item = prev.find(i => i.id === id)
+      if (item) URL.revokeObjectURL(item.previewUrl)
+      return prev.filter(i => i.id !== id)
+    })
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  const filePending = fileQueue.filter(i => i.status === 'pending').length
+  const urlPending = urlQueue.filter(i => i.status === 'pending').length
+  const imgPending = imageQueue.filter(i => i.status === 'pending').length
 
   return (
     <div className="space-y-0 divide-y divide-ink-800">
-      {/* Section 1 — File upload */}
+
+      {/* Auto-process toggle */}
+      <div className="flex items-center justify-between mb-6 pb-4 border-b border-ink-800">
+        <div>
+          <p className="text-sm font-medium text-ink-100">Auto-process after ingest</p>
+          <p className="text-xs text-ink-500 mt-0.5">Runs the pipeline automatically after each item is ingested</p>
+        </div>
+        <button
+          onClick={() => setAutoProcess(v => !v)}
+          className={[
+            'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+            autoProcess ? 'bg-amber-400' : 'bg-ink-700',
+          ].join(' ')}
+          role="switch"
+          aria-checked={autoProcess}
+        >
+          <span className={[
+            'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+            autoProcess ? 'translate-x-6' : 'translate-x-1',
+          ].join(' ')} />
+        </button>
+      </div>
+
+      {/* Section 1 — File queue */}
       <div className="pb-8">
-        <p className="label-eyebrow mb-4">Ingest Document</p>
+        <p className="label-eyebrow mb-4">Ingest Documents</p>
+
+        {/* Drop zone */}
         <div
           onDragOver={(e) => { e.preventDefault(); setDocDragOver(true) }}
           onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDocDragOver(false) }}
           onDrop={(e) => {
             e.preventDefault()
             setDocDragOver(false)
-            const file = e.dataTransfer.files[0]
-            if (!file) return
-            const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
-            if (!DOC_EXTS.has(ext)) { setDocError('Unsupported format. Use PDF, MD, CSV, JSON, or YAML.'); return }
-            setDocFile(file)
+            addFilesToQueue(e.dataTransfer.files)
           }}
           onClick={() => docInputRef.current?.click()}
           className={[
@@ -426,134 +642,240 @@ function IngestTab({
             ref={docInputRef}
             type="file"
             accept=".pdf,.md,.csv,.json,.yaml,.yml"
+            multiple
             className="hidden"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) setDocFile(f) }}
+            onChange={(e) => { if (e.target.files) { addFilesToQueue(e.target.files); e.target.value = '' } }}
           />
-          {docFile ? (
-            <p className="text-sm text-ink-100">{docFile.name}</p>
-          ) : (
-            <>
-              <svg className="w-8 h-8 text-ink-600 mx-auto mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="17 8 12 3 7 8" />
-                <line x1="12" y1="3" x2="12" y2="15" />
-              </svg>
-              <p className="text-sm text-ink-400">Drop a file or click to browse</p>
-              <p className="text-xs text-ink-600 mt-1">PDF, MD, CSV, JSON, YAML</p>
-            </>
+          <svg className="w-8 h-8 text-ink-600 mx-auto mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+          <p className="text-sm text-ink-400">Drop files or click to browse</p>
+          <p className="text-xs text-ink-600 mt-1">PDF, MD, CSV, JSON, YAML — multiple allowed</p>
+        </div>
+
+        {/* File queue list */}
+        {fileQueue.length > 0 && (
+          <div className="mt-4 space-y-1">
+            {fileQueue.map(item => (
+              <div key={item.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-900 text-sm">
+                <QueueStatusIcon status={item.status} />
+                <span className="flex-1 truncate text-ink-100 min-w-0">{item.file.name}</span>
+                <span className="text-xs text-ink-500 shrink-0">{formatBytes(item.file.size)}</span>
+                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
+                {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
+                <button
+                  onClick={() => setFileQueue(prev => prev.filter(i => i.id !== item.id))}
+                  disabled={item.status === 'uploading'}
+                  className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
+                  aria-label="Remove"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* File queue actions */}
+        <div className="mt-3 flex items-center gap-3">
+          {filePending > 0 && (
+            <button
+              onClick={runFileQueue}
+              disabled={fileRunning}
+              className="btn-primary text-sm"
+            >
+              {fileRunning ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-9-9" />
+                  </svg>
+                  Ingesting…
+                </>
+              ) : `Ingest All (${filePending})`}
+            </button>
+          )}
+          {fileQueue.some(i => i.status === 'done' || i.status === 'error') && (
+            <button
+              onClick={() => setFileQueue(prev => prev.filter(i => i.status !== 'done' && i.status !== 'error'))}
+              className="btn-ghost text-xs"
+            >
+              Clear done
+            </button>
           )}
         </div>
-        <div className="mt-3 flex items-center gap-3">
-          <button
-            onClick={handleDocSubmit}
-            disabled={!docFile || docUploading}
-            className="btn-primary text-sm"
-          >
-            {docUploading ? (
-              <>
-                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 12a9 9 0 1 1-9-9" />
-                </svg>
-                Uploading…
-              </>
-            ) : 'Upload'}
-          </button>
-          {docError && <p className="text-xs text-rose-400">{docError}</p>}
-        </div>
       </div>
 
-      {/* Section 2 — URL */}
+      {/* Section 2 — URL queue */}
       <div className="py-8">
-        <p className="label-eyebrow mb-4">Ingest URL</p>
-        <input
-          type="url"
-          value={urlValue}
-          onChange={(e) => setUrlValue(e.target.value)}
-          placeholder="https://..."
-          maxLength={500}
-          className="input w-full"
-        />
-        <div className="mt-3 flex items-center gap-3">
+        <p className="label-eyebrow mb-4">Ingest URLs</p>
+
+        {/* URL input row */}
+        <div className="flex gap-2">
+          <input
+            type="url"
+            value={urlInput}
+            onChange={(e) => { setUrlInput(e.target.value); setUrlInputError(null) }}
+            onKeyDown={(e) => { if (e.key === 'Enter') addUrlToQueue() }}
+            placeholder="https://..."
+            maxLength={500}
+            className="input flex-1"
+          />
           <button
-            onClick={handleUrlSubmit}
-            disabled={!urlValue.trim() || urlUploading}
-            className="btn-primary text-sm"
+            onClick={addUrlToQueue}
+            disabled={!urlInput.trim()}
+            className="btn-secondary text-sm shrink-0"
           >
-            {urlUploading ? (
-              <>
-                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 12a9 9 0 1 1-9-9" />
-                </svg>
-                Ingesting…
-              </>
-            ) : 'Ingest'}
+            Add to queue
           </button>
-          {urlError && <p className="text-xs text-rose-400">{urlError}</p>}
+        </div>
+        {urlInputError && <p className="text-xs text-rose-400 mt-1">{urlInputError}</p>}
+
+        {/* URL queue list */}
+        {urlQueue.length > 0 && (
+          <div className="mt-4 space-y-1">
+            {urlQueue.map(item => (
+              <div key={item.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-900 text-sm">
+                <QueueStatusIcon status={item.status} />
+                <span className="flex-1 truncate text-ink-100 min-w-0 max-w-xs" title={item.url}>{item.url}</span>
+                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
+                {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
+                <button
+                  onClick={() => setUrlQueue(prev => prev.filter(i => i.id !== item.id))}
+                  disabled={item.status === 'uploading'}
+                  className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
+                  aria-label="Remove"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* URL queue actions */}
+        <div className="mt-3 flex items-center gap-3">
+          {urlPending > 0 && (
+            <button
+              onClick={runUrlQueue}
+              disabled={urlRunning}
+              className="btn-primary text-sm"
+            >
+              {urlRunning ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-9-9" />
+                  </svg>
+                  Ingesting…
+                </>
+              ) : `Ingest All (${urlPending})`}
+            </button>
+          )}
+          {urlQueue.some(i => i.status === 'done' || i.status === 'error') && (
+            <button
+              onClick={() => setUrlQueue(prev => prev.filter(i => i.status !== 'done' && i.status !== 'error'))}
+              className="btn-ghost text-xs"
+            >
+              Clear done
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Section 3 — Image upload */}
+      {/* Section 3 — Image queue */}
       <div className="pt-8">
-        <p className="label-eyebrow mb-4">Upload Image</p>
+        <p className="label-eyebrow mb-4">Upload Images</p>
+
+        {/* Drop zone */}
         <div
           onDragOver={(e) => { e.preventDefault(); setImgDragOver(true) }}
           onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setImgDragOver(false) }}
           onDrop={(e) => {
             e.preventDefault()
             setImgDragOver(false)
-            const file = e.dataTransfer.files[0]
-            if (!file) return
-            const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
-            if (!IMG_EXTS.has(ext)) { setImgError('Unsupported format. Use PNG, JPG, WEBP, or GIF.'); return }
-            setImgFileWithPreview(file)
+            addImagesToQueue(e.dataTransfer.files)
           }}
           onClick={() => imgInputRef.current?.click()}
           className={[
             'border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors',
-            imgDragOver ? 'border-amber-400' : 'border-ink-700 hover:border-amber-400/50',
+            imageDragOver ? 'border-amber-400' : 'border-ink-700 hover:border-amber-400/50',
           ].join(' ')}
         >
           <input
             ref={imgInputRef}
             type="file"
-            accept="image/*"
+            accept=".png,.jpg,.jpeg,.webp,.gif"
+            multiple
             className="hidden"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) setImgFileWithPreview(f) }}
+            onChange={(e) => { if (e.target.files) { addImagesToQueue(e.target.files); e.target.value = '' } }}
           />
-          {imgPreview ? (
-            <div className="flex flex-col items-center gap-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={imgPreview} alt="preview" className="h-20 w-20 object-cover rounded" />
-              <p className="text-xs text-ink-400">{imgFile?.name}</p>
-            </div>
-          ) : (
-            <>
-              <svg className="w-8 h-8 text-ink-600 mx-auto mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
-              </svg>
-              <p className="text-sm text-ink-400">Drop an image or click to browse</p>
-              <p className="text-xs text-ink-600 mt-1">PNG, JPG, WEBP, GIF</p>
-            </>
-          )}
+          <svg className="w-8 h-8 text-ink-600 mx-auto mb-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+          <p className="text-sm text-ink-400">Drop images or click to browse</p>
+          <p className="text-xs text-ink-600 mt-1">PNG, JPG, WEBP, GIF — multiple allowed</p>
         </div>
+
+        {/* Image queue list */}
+        {imageQueue.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-3">
+            {imageQueue.map(item => (
+              <div key={item.id} className="flex flex-col items-center gap-1.5 p-2 rounded-lg bg-ink-900 w-28">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={item.previewUrl} alt={item.file.name} className="h-12 w-12 object-cover rounded" />
+                <span className="text-xs text-ink-200 truncate w-full text-center" title={item.file.name}>{item.file.name}</span>
+                <span className="text-xs text-ink-500">{formatBytes(item.file.size)}</span>
+                <div className="flex items-center gap-1">
+                  <QueueStatusIcon status={item.status} />
+                  {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
+                </div>
+                {item.error && <span className="text-xs text-rose-400 text-center" title={item.error}>{item.error}</span>}
+                <button
+                  onClick={() => removeImageFromQueue(item.id)}
+                  disabled={item.status === 'uploading'}
+                  className="text-ink-600 hover:text-rose-400 disabled:opacity-30 text-xs leading-none"
+                  aria-label="Remove"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Image queue actions */}
         <div className="mt-3 flex items-center gap-3">
-          <button
-            onClick={handleImgSubmit}
-            disabled={!imgFile || imgUploading}
-            className="btn-primary text-sm"
-          >
-            {imgUploading ? (
-              <>
-                <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 12a9 9 0 1 1-9-9" />
-                </svg>
-                Uploading…
-              </>
-            ) : 'Upload'}
-          </button>
-          {imgError && <p className="text-xs text-rose-400">{imgError}</p>}
+          {imgPending > 0 && (
+            <button
+              onClick={runImageQueue}
+              disabled={imageRunning}
+              className="btn-primary text-sm"
+            >
+              {imageRunning ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-9-9" />
+                  </svg>
+                  Uploading…
+                </>
+              ) : `Upload All (${imgPending})`}
+            </button>
+          )}
+          {imageQueue.some(i => i.status === 'done' || i.status === 'error') && (
+            <button
+              onClick={() => {
+                const toRemove = imageQueue.filter(i => i.status === 'done' || i.status === 'error')
+                toRemove.forEach(i => URL.revokeObjectURL(i.previewUrl))
+                setImageQueue(prev => prev.filter(i => i.status !== 'done' && i.status !== 'error'))
+              }}
+              className="btn-ghost text-xs"
+            >
+              Clear done
+            </button>
+          )}
         </div>
       </div>
     </div>
