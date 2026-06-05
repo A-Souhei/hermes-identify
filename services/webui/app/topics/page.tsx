@@ -132,7 +132,7 @@ export default function TopicsPage() {
           <p className="mt-1 text-ink-400 text-sm">Organize your knowledge extraction projects.</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button onClick={loadTopics} className="btn-ghost" title="Refresh" disabled={loading}>
+          <button onClick={() => loadTopics()} className="btn-ghost" title="Refresh" disabled={loading}>
             <svg
               className={['w-4 h-4', loading ? 'animate-spin' : ''].join(' ')}
               viewBox="0 0 24 24"
