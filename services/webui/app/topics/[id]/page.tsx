@@ -3,8 +3,14 @@
 import Link from 'next/link'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, Document, Entity, Image, SubTopic, TopicIndex, Topic } from '@/lib/api'
+import { relativeTime } from '@/lib/format'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+const MAX_DOC_BYTES = 25 * 1024 * 1024
+const MAX_IMG_BYTES = 10 * 1024 * 1024
+const DOC_EXTS = new Set(['.pdf', '.md', '.csv', '.json', '.yaml', '.yml'])
+const IMG_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif'])
 
 const ENTITY_TYPE_COLORS: Record<string, { dot: string; label: string }> = {
   concept:      { dot: 'bg-blue-400',   label: 'text-blue-300' },
@@ -24,18 +30,6 @@ function EntityTypeBadge({ type }: { type: string | null }) {
       {type}
     </span>
   )
-}
-
-function relativeTime(isoString: string): string {
-  const diff = Date.now() - new Date(isoString).getTime()
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -338,6 +332,7 @@ function IngestTab({
 
   async function handleDocSubmit() {
     if (!docFile) return
+    if (docFile.size > MAX_DOC_BYTES) { setDocError('File exceeds 25 MB limit'); return }
     setDocUploading(true)
     setDocError(null)
     try {
@@ -353,7 +348,15 @@ function IngestTab({
   }
 
   async function handleUrlSubmit() {
-    if (!urlValue.trim()) return
+    const trimmed = urlValue.trim()
+    if (!trimmed) return
+    try {
+      const parsed = new URL(trimmed)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error()
+    } catch {
+      setUrlError('Enter a valid http:// or https:// URL')
+      return
+    }
     setUrlUploading(true)
     setUrlError(null)
     try {
@@ -370,6 +373,7 @@ function IngestTab({
 
   async function handleImgSubmit() {
     if (!imgFile) return
+    if (imgFile.size > MAX_IMG_BYTES) { setImgError('File exceeds 10 MB limit'); return }
     setImgUploading(true)
     setImgError(null)
     try {
@@ -391,12 +395,15 @@ function IngestTab({
         <p className="label-eyebrow mb-4">Ingest Document</p>
         <div
           onDragOver={(e) => { e.preventDefault(); setDocDragOver(true) }}
-          onDragLeave={() => setDocDragOver(false)}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDocDragOver(false) }}
           onDrop={(e) => {
             e.preventDefault()
             setDocDragOver(false)
             const file = e.dataTransfer.files[0]
-            if (file) setDocFile(file)
+            if (!file) return
+            const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+            if (!DOC_EXTS.has(ext)) { setDocError('Unsupported format. Use PDF, MD, CSV, JSON, or YAML.'); return }
+            setDocFile(file)
           }}
           onClick={() => docInputRef.current?.click()}
           className={[
@@ -479,12 +486,15 @@ function IngestTab({
         <p className="label-eyebrow mb-4">Upload Image</p>
         <div
           onDragOver={(e) => { e.preventDefault(); setImgDragOver(true) }}
-          onDragLeave={() => setImgDragOver(false)}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setImgDragOver(false) }}
           onDrop={(e) => {
             e.preventDefault()
             setImgDragOver(false)
             const file = e.dataTransfer.files[0]
-            if (file) setImgFileWithPreview(file)
+            if (!file) return
+            const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+            if (!IMG_EXTS.has(ext)) { setImgError('Unsupported format. Use PNG, JPG, WEBP, or GIF.'); return }
+            setImgFileWithPreview(file)
           }}
           onClick={() => imgInputRef.current?.click()}
           className={[
