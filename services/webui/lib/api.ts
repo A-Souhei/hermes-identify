@@ -142,4 +142,7 @@ export const api = {
   jobs: {
     get: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
   },
+  images: {
+    contentUrl: (id: string) => `/api/entifier/images/${encodeURIComponent(id)}/content`,
+  },
 }
