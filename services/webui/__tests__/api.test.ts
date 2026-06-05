@@ -126,6 +126,21 @@ describe('api.topics', () => {
     expect(call[0]).toBe('/api/entifier/topics/abc/ingest/image')
     expect(call[1].body).toBeInstanceOf(FormData)
   })
+  it('search posts query to /api/entifier/topics/:id/search', async () => {
+    mockFetch({ entities: [], images: [] })
+    await api.topics.search('abc', 'solar energy')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/search')
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toMatchObject({ query: 'solar energy', limit: 10 })
+  })
+
+  it('search uses custom limit when provided', async () => {
+    mockFetch({ entities: [], images: [] })
+    await api.topics.search('abc', 'wind', 5)
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(JSON.parse(call[1].body)).toMatchObject({ query: 'wind', limit: 5 })
+  })
 })
 
 describe('api.jobs', () => {

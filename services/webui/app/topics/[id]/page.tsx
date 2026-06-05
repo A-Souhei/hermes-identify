@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { api, Document, Entity, Image, SubTopic, TopicIndex, Topic } from '@/lib/api'
+import { api, Document, Entity, Image, SubTopic, TopicIndex, Topic, SearchResponse } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
 import { Lightbox } from '@/components/Lightbox'
 
@@ -560,9 +560,145 @@ function IngestTab({
   )
 }
 
+// ── Search Tab ────────────────────────────────────────────────────────────────
+
+function SearchTab({
+  topicId,
+  onOpenImageLightbox,
+}: {
+  topicId: string
+  onOpenImageLightbox: (images: Image[], index: number) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [results, setResults] = useState<SearchResponse | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
+
+  async function handleSearch() {
+    const trimmed = query.trim()
+    if (!trimmed || searching) return
+    setSearching(true)
+    setSearchError(null)
+    try {
+      const data = await api.topics.search(topicId, trimmed)
+      setResults(data)
+    } catch (err) {
+      setSearchError(err instanceof Error ? err.message : 'Search failed')
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Input row */}
+      <div className="flex gap-3">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleSearch() }}
+          maxLength={200}
+          className="input flex-1"
+          placeholder="Search entities and images…"
+        />
+        <button
+          onClick={handleSearch}
+          disabled={searching || !query.trim()}
+          className="btn-primary shrink-0"
+        >
+          {searching ? (
+            <>
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-9-9" />
+              </svg>
+              Searching…
+            </>
+          ) : 'Search'}
+        </button>
+      </div>
+
+      {/* States */}
+      {results === null && !searchError && (
+        <div className="empty">
+          <p>Enter a query to search entities and images semantically.</p>
+        </div>
+      )}
+
+      {searchError && (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4">
+          <p className="text-sm text-rose-300">{searchError}</p>
+        </div>
+      )}
+
+      {results !== null && results.entities.length === 0 && results.images.length === 0 && (
+        <div className="empty">
+          <p>No matches found for &laquo;{query}&raquo;.</p>
+        </div>
+      )}
+
+      {/* Entity hits */}
+      {results !== null && results.entities.length > 0 && (
+        <div>
+          <p className="label-eyebrow mb-3">Entity Matches ({results.entities.length})</p>
+          <div className="flex flex-col gap-2">
+            {results.entities.map((hit, i) => (
+              <div key={hit.entity.id + i} className="card p-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-amber-400/15 text-amber-300">
+                    {Math.round(hit.score * 100)}%
+                  </span>
+                  <span className="font-semibold text-ink-50">{hit.entity.name}</span>
+                  <EntityTypeBadge type={hit.entity.entity_type} />
+                </div>
+                {hit.matched_excerpt && (
+                  <p className="text-sm text-ink-300 border-l-2 border-amber-400/40 pl-3 mt-1 line-clamp-3">
+                    {hit.matched_excerpt}
+                  </p>
+                )}
+                {hit.entity.description && (
+                  <p className="text-xs text-ink-500 mt-1 line-clamp-2">{hit.entity.description}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Image hits */}
+      {results !== null && results.images.length > 0 && (
+        <div>
+          <p className="label-eyebrow mb-3">Image Matches ({results.images.length})</p>
+          <div className="flex flex-wrap gap-3">
+            {results.images.map((hit, i) => (
+              <div
+                key={hit.image.id + i}
+                className="card-hover cursor-pointer w-40 p-3 flex flex-col gap-2"
+                onClick={() => onOpenImageLightbox([hit.image], 0)}
+              >
+                <div className="w-full aspect-square bg-ink-800 rounded-lg flex items-center justify-center">
+                  <span className="text-2xl font-bold text-ink-500 uppercase">
+                    {hit.image.filename.charAt(0)}
+                  </span>
+                </div>
+                <p className="text-xs text-ink-200 truncate font-medium" title={hit.image.filename}>
+                  {hit.image.filename}
+                </p>
+                <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-amber-400/15 text-amber-300 self-start">
+                  {Math.round(hit.score * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type Tab = 'index' | 'entities' | 'documents' | 'images' | 'ingest'
+type Tab = 'index' | 'entities' | 'documents' | 'images' | 'ingest' | 'search'
 
 export default function TopicDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [topicId, setTopicId] = useState<string | null>(null)
@@ -576,6 +712,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   const [activeSubtopicId, setActiveSubtopicId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('index')
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
+  const [lightboxImages, setLightboxImages] = useState<Image[] | null>(null)
   const [loadError, setLoadError] = React.useState<string | null>(null)
   const [processing, setProcessing] = useState(false)
   const { toasts, addToast } = useToasts()
@@ -712,6 +849,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
     { key: 'documents', label: 'Documents' },
     { key: 'images', label: 'Images' },
     { key: 'ingest', label: 'Ingest' },
+    { key: 'search', label: 'Search' },
   ]
 
   function renderTabContent() {
@@ -754,7 +892,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
           </div>
         )
       }
-      return <ImagesTab images={images} lightboxIndex={lightboxIndex} onOpenLightbox={(i) => setLightboxIndex(i)} />
+      return <ImagesTab images={images} lightboxIndex={lightboxIndex} onOpenLightbox={(i) => { setLightboxImages(images); setLightboxIndex(i) }} />
     }
     if (activeTab === 'ingest' && topicId) {
       return (
@@ -763,6 +901,17 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
           onDocumentIngested={() => setDocuments(null)}
           onImageIngested={() => setImages(null)}
           addToast={addToast}
+        />
+      )
+    }
+    if (activeTab === 'search' && topicId) {
+      return (
+        <SearchTab
+          topicId={topicId}
+          onOpenImageLightbox={(imgs, i) => {
+            setLightboxImages(imgs)
+            setLightboxIndex(i)
+          }}
         />
       )
     }
@@ -837,12 +986,12 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       </div>
 
-      {lightboxIndex !== null && images && (
+      {lightboxIndex !== null && lightboxImages && (
         <Lightbox
           key={lightboxIndex}
-          images={images}
+          images={lightboxImages}
           initialIndex={lightboxIndex}
-          onClose={() => setLightboxIndex(null)}
+          onClose={() => { setLightboxIndex(null); setLightboxImages(null) }}
         />
       )}
 

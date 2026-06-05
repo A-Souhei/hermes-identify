@@ -107,6 +107,22 @@ async function upload<T>(path: string, formData: FormData): Promise<T> {
   return res.json() as Promise<T>
 }
 
+export interface EntitySearchHit {
+  score: number
+  entity: Entity
+  matched_excerpt: string
+}
+
+export interface ImageSearchHit {
+  score: number
+  image: Image
+}
+
+export interface SearchResponse {
+  entities: EntitySearchHit[]
+  images: ImageSearchHit[]
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -138,6 +154,11 @@ export const api = {
       const fd = new FormData(); fd.append('file', file)
       return upload<Image>(`/topics/${encodeURIComponent(id)}/ingest/image`, fd)
     },
+    search: (id: string, query: string, limit = 10) =>
+      request<SearchResponse>(`/topics/${encodeURIComponent(id)}/search`, {
+        method: 'POST',
+        body: JSON.stringify({ query, limit }),
+      }),
   },
   jobs: {
     get: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
