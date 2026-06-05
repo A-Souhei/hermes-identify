@@ -71,6 +71,22 @@ describe('api.topics', () => {
     expect(call[0]).toBe('/api/entifier/topics/abc/process')
     expect(call[1].method).toBe('POST')
   })
+
+  it('index calls GET /api/entifier/topics/:id/index', async () => {
+    mockFetch({ topic_id: 'abc', topic_name: 'T', subtopics: [] })
+    await api.topics.index('abc')
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/entifier/topics/abc/index',
+      expect.objectContaining({})
+    )
+  })
+
+  it('entities encodes subtopicId with special chars', async () => {
+    mockFetch([])
+    await api.topics.entities('abc', 'st 1')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/entities?subtopic_id=st%201')
+  })
 })
 
 describe('api.jobs', () => {

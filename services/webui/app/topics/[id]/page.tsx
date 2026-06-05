@@ -221,9 +221,13 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   const [loading, setLoading] = useState(true)
   const [activeSubtopicId, setActiveSubtopicId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('index')
+  const [loadError, setLoadError] = React.useState<string | null>(null)
   const [processing, setProcessing] = useState(false)
   const { toasts, addToast } = useToasts()
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollCountRef = React.useRef(0)
+  const mountedRef = React.useRef(true)
+  const runningRef = React.useRef(false)
 
   // Resolve async params (Next.js 15)
   useEffect(() => {
@@ -232,6 +236,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
 
   const loadAll = useCallback(async (id: string, subtopicFilter?: string | null) => {
     setLoading(true)
+    setLoadError(null)
     try {
       const [topicData, subtopicsData, indexData, entitiesData] = await Promise.all([
         api.topics.get(id),
@@ -243,8 +248,8 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
       setSubtopics(subtopicsData)
       setTopicIndex(indexData)
       setEntities(entitiesData)
-    } catch {
-      // silently keep whatever was loaded before
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load topic')
     } finally {
       setLoading(false)
     }
@@ -257,14 +262,17 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   // Refetch entities when active subtopic changes
   useEffect(() => {
     if (!topicId) return
+    let cancelled = false
     api.topics.entities(topicId, activeSubtopicId ?? undefined)
-      .then(setEntities)
+      .then((d) => { if (!cancelled) setEntities(d) })
       .catch(() => {})
+    return () => { cancelled = true }
   }, [topicId, activeSubtopicId])
 
-  // Cleanup polling on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       if (pollingRef.current) clearInterval(pollingRef.current)
     }
   }, [])
@@ -277,31 +285,48 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   }
 
   const handleRunPipeline = async () => {
-    if (!topicId || processing) return
+    if (!topicId || runningRef.current) return
+    runningRef.current = true
     setProcessing(true)
     try {
       const job = await api.topics.process(topicId)
+      if (!mountedRef.current) { runningRef.current = false; return }
+      pollCountRef.current = 0
       pollingRef.current = setInterval(async () => {
+        pollCountRef.current += 1
+        if (pollCountRef.current > 200) {
+          stopPolling()
+          setProcessing(false)
+          runningRef.current = false
+          addToast('Pipeline timed out — check status later', 'error')
+          return
+        }
         try {
           const updated = await api.jobs.get(job.id)
+          if (!mountedRef.current) return
           if (updated.status === 'completed') {
             stopPolling()
             setProcessing(false)
+            runningRef.current = false
             addToast('Pipeline completed', 'success')
             loadAll(topicId, activeSubtopicId)
           } else if (updated.status === 'failed') {
             stopPolling()
             setProcessing(false)
+            runningRef.current = false
             addToast(updated.error ?? 'Pipeline failed', 'error')
           }
         } catch {
+          if (!mountedRef.current) return
           stopPolling()
           setProcessing(false)
+          runningRef.current = false
           addToast('Failed to poll job status', 'error')
         }
       }, 3000)
     } catch (err) {
       setProcessing(false)
+      runningRef.current = false
       addToast(err instanceof Error ? err.message : 'Failed to start pipeline', 'error')
     }
   }
@@ -379,6 +404,11 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
                 <SkeletonBlock className="h-16 w-full" />
                 <SkeletonBlock className="h-16 w-full" />
                 <SkeletonBlock className="h-16 w-4/5" />
+              </div>
+            ) : loadError ? (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-center">
+                <p className="text-sm text-rose-300 mb-3">{loadError}</p>
+                <button className="btn-secondary text-xs" onClick={() => topicId && loadAll(topicId, activeSubtopicId)}>Retry</button>
               </div>
             ) : activeTab === 'index' ? (
               <IndexTab topicIndex={topicIndex} />
