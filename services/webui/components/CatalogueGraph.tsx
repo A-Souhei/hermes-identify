@@ -3,19 +3,19 @@
 import { useEffect, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import SpriteText from 'three-spritetext'
-import { api, Topic } from '@/lib/api'
+import { api, Topic, SubTopicIndexItem } from '@/lib/api'
 
 const ForceGraph3D = dynamic(() => import('react-force-graph-3d'), { ssr: false })
 
 const TOPIC_PALETTE = [
-  '#f59e0b', '#3b82f6', '#10b981', '#8b5cf6',
-  '#f43f5e', '#06b6d4', '#84cc16', '#f97316',
+  '#3b82f6', '#10b981', '#8b5cf6', '#f43f5e',
+  '#06b6d4', '#84cc16', '#f97316', '#e879f9',
 ]
 
 interface GraphNode {
   id: string
   name: string
-  type: 'topic' | 'subtopic'
+  type: 'topic' | 'subtopic' | 'section' | 'entity'
   val: number
   color: string
 }
@@ -44,10 +44,14 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s
 }
 
+const SUBTOPIC_COLOR = '#a78bfa'  // violet
+const SECTION_COLOR  = '#34d399'  // emerald
+const ENTITY_COLOR   = '#94a3b8'  // slate
+
 function buildGraph(
   topics: Topic[],
   topicColors: Record<string, string>,
-  indices: Array<{ topicId: string; subtopics: Array<{ id: string; name: string }> }>,
+  indices: Array<{ topicId: string; subtopics: SubTopicIndexItem[] }>,
   linkPairs: Array<[string, string]>,
 ): GraphData {
   const nodes: GraphNode[] = []
@@ -59,16 +63,28 @@ function buildGraph(
   }
 
   for (const { topicId, subtopics } of indices) {
-    const color = topicColors[topicId] || '#78716c'
+    const topicColor = topicColors[topicId] || '#78716c'
+
     for (const sub of subtopics) {
-      nodes.push({ id: sub.id, name: sub.name, type: 'subtopic', val: 3, color })
-      links.push({ source: topicId, target: sub.id, color: '#aaaaaa', width: 0.3 })
+      nodes.push({ id: sub.id, name: sub.name, type: 'subtopic', val: 3, color: SUBTOPIC_COLOR })
+      links.push({ source: topicId, target: sub.id, color: topicColor, width: 0.3 })
+
+      for (const section of sub.sections) {
+        nodes.push({ id: section.id, name: section.name, type: 'section', val: 2, color: SECTION_COLOR })
+        links.push({ source: sub.id, target: section.id, color: SUBTOPIC_COLOR, width: 0.2 })
+
+        for (const entity of section.entities) {
+          nodes.push({ id: entity.id, name: entity.name, type: 'entity', val: 1, color: ENTITY_COLOR })
+          links.push({ source: section.id, target: entity.id, color: SECTION_COLOR, width: 0.15 })
+        }
+      }
     }
   }
 
+  // Topic-topic links: each colored with the source topic's color
   for (const [a, b] of linkPairs) {
     if (topicSet.has(a) && topicSet.has(b)) {
-      links.push({ source: a, target: b, color: '#f59e0b', width: 0.6 })
+      links.push({ source: a, target: b, color: topicColors[a] || '#ffffff', width: 0.6 })
     }
   }
 
@@ -81,12 +97,12 @@ export default function CatalogueGraph({ topics }: Props) {
   const graphRef = useRef<any>(null)
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
   const [graphData, setGraphData] = useState<GraphData | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(topics.length > 0)
 
   useEffect(() => {
     if (!graphRef.current || !graphData) return
-    graphRef.current.d3Force('charge')?.strength(-200)
-    graphRef.current.d3Force('link')?.distance(60)
+    graphRef.current.d3Force('charge')?.strength(-120)
+    graphRef.current.d3Force('link')?.distance(40)
     graphRef.current.d3ReheatSimulation?.()
   }, [graphData])
 
@@ -116,7 +132,7 @@ export default function CatalogueGraph({ topics }: Props) {
           topics.map(t =>
             api.topics.index(t.id)
               .then(idx => ({ topicId: t.id, subtopics: idx.subtopics }))
-              .catch(() => ({ topicId: t.id, subtopics: [] }))
+              .catch(() => ({ topicId: t.id, subtopics: [] as SubTopicIndexItem[] }))
           )
         ),
         Promise.all(
@@ -151,8 +167,8 @@ export default function CatalogueGraph({ topics }: Props) {
     return () => { cancelled = true }
   }, [topics])
 
-  const handleFit    = () => graphRef.current?.zoomToFit(400, 48)
-  const handleCenter = () => graphRef.current?.cameraPosition({ x: 0, y: 0, z: 300 }, { x: 0, y: 0, z: 0 }, 600)
+  const handleFit    = () => graphRef.current?.zoomToFit(600, 50)
+  const handleCenter = () => graphRef.current?.zoomToFit(800, 50)
 
   return (
     <div ref={containerRef} className="h-[calc(100vh-200px)] w-full relative overflow-hidden">
@@ -199,27 +215,28 @@ export default function CatalogueGraph({ topics }: Props) {
           height={dimensions.height}
           backgroundColor="#050403"
           nodeLabel={(node) => escapeHtml((node as unknown as GraphNode).name)}
-          nodeAutoColorBy="color"
           nodeVal="val"
           nodeThreeObjectExtend={true}
           nodeThreeObject={(node) => {
             const n = node as unknown as GraphNode
-            const isTopic = n.type === 'topic'
-            const sprite = new SpriteText(truncate(n.name, isTopic ? 20 : 16))
+            const isTopic    = n.type === 'topic'
+            const isSubtopic = n.type === 'subtopic'
+            const isSection  = n.type === 'section'
+            const sprite = new SpriteText(truncate(n.name, isTopic ? 20 : isSubtopic ? 18 : isSection ? 16 : 14))
             sprite.color = n.color
-            sprite.textHeight = isTopic ? 5 : 3
+            sprite.textHeight = isTopic ? 5 : isSubtopic ? 3.5 : isSection ? 2.5 : 1.8
             sprite.backgroundColor = 'rgba(0,0,0,0.45)'
-            sprite.padding = 2
+            sprite.padding = isTopic ? 2 : 1
             sprite.borderRadius = 3
             return sprite
           }}
           linkColor={(link) => (link as unknown as GraphLink).color}
           linkWidth={(link) => (link as unknown as GraphLink).width}
-          linkOpacity={0.6}
+          linkOpacity={0.7}
           onNodeClick={(node) => {
             const n = node as unknown as GraphNode & { x: number; y: number; z: number }
             if (!isFinite(n.x) || !isFinite(n.y) || !isFinite(n.z)) return
-            const distance = n.type === 'topic' ? 120 : 70
+            const distance = n.type === 'topic' ? 120 : n.type === 'subtopic' ? 70 : n.type === 'section' ? 45 : 30
             const mag = Math.hypot(n.x, n.y, n.z) || 1
             const ratio = 1 + distance / mag
             graphRef.current?.cameraPosition(
