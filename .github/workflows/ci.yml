@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m venv services/entifier/.venv
+          services/entifier/.venv/bin/pip install --upgrade pip
+          services/entifier/.venv/bin/pip install -r services/entifier/requirements.txt
+
+      - name: Run unit tests
+        run: make test

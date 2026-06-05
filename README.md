@@ -1,5 +1,7 @@
 # hermes-identify
 
+[![CI](https://github.com/A-Souhei/hermes-identify/actions/workflows/ci.yml/badge.svg)](https://github.com/A-Souhei/hermes-identify/actions/workflows/ci.yml)
+
 Document ingestion, classification, and entity extraction service for the hermes-docwriter plugin.
 
 Ingest PDFs, Markdown, CSV, JSON, YAML files, URLs, and images — the service classifies them into sub-topics, extracts named entities, groups them into document sections, and exposes everything via a REST API.
