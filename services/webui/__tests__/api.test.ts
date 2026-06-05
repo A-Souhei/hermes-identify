@@ -39,4 +39,62 @@ describe('api.topics', () => {
     mockFetch('bad request', false, 422)
     await expect(api.topics.list()).rejects.toThrow('422')
   })
+
+  it('get calls GET /api/entifier/topics/:id', async () => {
+    mockFetch({ id: 'abc', name: 'T', description: null, created_at: '' })
+    await api.topics.get('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc', expect.objectContaining({}))
+  })
+
+  it('subtopics calls GET /api/entifier/topics/:id/subtopics', async () => {
+    mockFetch([])
+    await api.topics.subtopics('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/subtopics', expect.objectContaining({}))
+  })
+
+  it('entities calls GET /api/entifier/topics/:id/entities without filter', async () => {
+    mockFetch([])
+    await api.topics.entities('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/entities', expect.objectContaining({}))
+  })
+
+  it('entities includes ?subtopic_id= when subtopicId is provided', async () => {
+    mockFetch([])
+    await api.topics.entities('abc', 'st-1')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/entities?subtopic_id=st-1', expect.objectContaining({}))
+  })
+
+  it('process calls POST /api/entifier/topics/:id/process', async () => {
+    mockFetch({ id: 'j1', topic_id: 'abc', type: 'pipeline', status: 'pending', error: null, created_at: '', completed_at: null })
+    await api.topics.process('abc')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/process')
+    expect(call[1].method).toBe('POST')
+  })
+
+  it('index calls GET /api/entifier/topics/:id/index', async () => {
+    mockFetch({ topic_id: 'abc', topic_name: 'T', subtopics: [] })
+    await api.topics.index('abc')
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/entifier/topics/abc/index',
+      expect.objectContaining({})
+    )
+  })
+
+  it('entities encodes subtopicId with special chars', async () => {
+    mockFetch([])
+    await api.topics.entities('abc', 'st 1')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/entities?subtopic_id=st%201')
+  })
+})
+
+describe('api.jobs', () => {
+  afterEach(() => jest.restoreAllMocks())
+
+  it('get calls GET /api/entifier/jobs/:id', async () => {
+    mockFetch({ id: 'j1', topic_id: 'abc', type: 'pipeline', status: 'completed', error: null, created_at: '', completed_at: '' })
+    await api.jobs.get('j1')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/jobs/j1', expect.objectContaining({}))
+  })
 })
