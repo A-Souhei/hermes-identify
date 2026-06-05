@@ -31,6 +31,10 @@ interface Props {
   topics: Topic[]
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 function buildGraph(
   indices: Array<{ topicId: string; subtopics: Array<{ id: string; name: string }> }>,
   linkPairs: Array<[string, string]>,
@@ -61,7 +65,7 @@ export default function CatalogueGraph({ topics }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
   const [graphData, setGraphData] = useState<GraphData | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -86,29 +90,33 @@ export default function CatalogueGraph({ topics }: Props) {
     async function load() {
       setLoading(true)
 
-      const [indexResults, linkResults] = await Promise.allSettled([
-        Promise.all(topics.map(t => api.topics.index(t.id).then(idx => ({ topicId: t.id, subtopics: idx.subtopics })))),
-        Promise.all(topics.map(t => api.topics.links(t.id).then(linked => linked.map(l => l.id)))),
+      // Per-topic catches so a single failing topic doesn't blank the entire graph
+      const [indices, linksByTopic] = await Promise.all([
+        Promise.all(
+          topics.map(t =>
+            api.topics.index(t.id)
+              .then(idx => ({ topicId: t.id, subtopics: idx.subtopics }))
+              .catch(() => ({ topicId: t.id, subtopics: [] }))
+          )
+        ),
+        Promise.all(
+          topics.map(t =>
+            api.topics.links(t.id)
+              .then(linked => linked.map(l => l.id))
+              .catch(() => [] as string[])
+          )
+        ),
       ])
 
       if (cancelled) return
 
-      const indices =
-        indexResults.status === 'fulfilled'
-          ? indexResults.value
-          : topics.map(t => ({ topicId: t.id, subtopics: [] }))
-
-      const linksByTopic =
-        linkResults.status === 'fulfilled'
-          ? linkResults.value
-          : topics.map(() => [] as string[])
-
+      // Deduplicate symmetric topic-link edges; use | separator (UUIDs only contain hex + -)
       const seenEdges = new Set<string>()
       const linkPairs: Array<[string, string]> = []
       for (let i = 0; i < topics.length; i++) {
         const fromId = topics[i].id
         for (const toId of linksByTopic[i]) {
-          const key = [fromId, toId].sort().join('-')
+          const key = [fromId, toId].sort().join('|')
           if (!seenEdges.has(key)) {
             seenEdges.add(key)
             linkPairs.push([fromId, toId])
@@ -153,11 +161,14 @@ export default function CatalogueGraph({ topics }: Props) {
           width={dimensions.width}
           height={dimensions.height}
           backgroundColor="#0a0908"
-          nodeLabel="name"
+          nodeLabel={(node) => escapeHtml((node as unknown as GraphNode).name)}
           nodeVal="val"
           nodeColor="color"
           linkColor="color"
-          linkWidth={(link) => (link as unknown as GraphLink).width}
+          linkWidth={(link) => {
+            const l = link as unknown as GraphLink
+            return typeof l.width === 'number' ? l.width : 1
+          }}
           onNodeClick={(node) => {
             const n = node as unknown as GraphNode
             if (n.type === 'topic') {
