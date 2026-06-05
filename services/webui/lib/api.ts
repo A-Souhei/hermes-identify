@@ -88,6 +88,7 @@ export interface Document {
   filename: string | null
   page_count: number | null
   minio_key: string | null
+  context?: string | null
   created_at: string
 }
 
@@ -145,19 +146,33 @@ export const api = {
     process: (id: string) => request<Job>(`/topics/${encodeURIComponent(id)}/process`, { method: 'POST' }),
     documents: (id: string) => request<Document[]>(`/topics/${encodeURIComponent(id)}/documents`),
     images: (id: string) => request<Image[]>(`/topics/${encodeURIComponent(id)}/images`),
-    ingestFile: (id: string, file: File) => {
-      const fd = new FormData(); fd.append('file', file)
+    ingestFile: (id: string, file: File, context?: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      if (context) fd.append('context', context)
       return upload<Document>(`/topics/${encodeURIComponent(id)}/ingest/file`, fd)
     },
-    ingestUrl: (id: string, url: string) =>
+    ingestUrl: (id: string, url: string, context?: string) =>
       request<Document>(`/topics/${encodeURIComponent(id)}/ingest/url`, {
         method: 'POST',
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, ...(context ? { context } : {}) }),
       }),
-    ingestImage: (id: string, file: File) => {
-      const fd = new FormData(); fd.append('file', file)
+    ingestImage: (id: string, file: File, context?: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      if (context) fd.append('context', context)
       return upload<Image>(`/topics/${encodeURIComponent(id)}/ingest/image`, fd)
     },
+    links: (id: string) => request<Topic[]>(`/topics/${encodeURIComponent(id)}/links`),
+    addLink: (id: string, linkedTopicId: string) =>
+      request<Topic>(`/topics/${encodeURIComponent(id)}/links`, {
+        method: 'POST',
+        body: JSON.stringify({ linked_topic_id: linkedTopicId }),
+      }),
+    removeLink: (id: string, otherId: string) =>
+      request<void>(`/topics/${encodeURIComponent(id)}/links/${encodeURIComponent(otherId)}`, {
+        method: 'DELETE',
+      }),
     search: (id: string, query: string, limit = 10) =>
       request<SearchResponse>(`/topics/${encodeURIComponent(id)}/search`, {
         method: 'POST',

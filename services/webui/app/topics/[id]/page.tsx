@@ -300,6 +300,7 @@ interface FileQueueItem {
   error?: string
   jobId?: string
   jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+  context?: string
 }
 
 interface UrlQueueItem {
@@ -309,6 +310,7 @@ interface UrlQueueItem {
   error?: string
   jobId?: string
   jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+  context?: string
 }
 
 interface ImageQueueItem {
@@ -319,6 +321,7 @@ interface ImageQueueItem {
   error?: string
   jobId?: string
   jobStatus?: 'pending' | 'running' | 'completed' | 'failed'
+  context?: string
 }
 
 let _queueId = 0
@@ -384,6 +387,11 @@ function IngestTab({
   onImageIngested: () => void
   addToast: (msg: string, type: 'success' | 'error') => void
 }) {
+  // Context open state (Set of item IDs with expanded context textarea)
+  const [contextOpen, setContextOpen] = useState<Set<number>>(new Set())
+  const toggleContext = (id: number) =>
+    setContextOpen(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
+
   // File queue
   const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([])
   const [fileRunning, setFileRunning] = useState(false)
@@ -490,7 +498,7 @@ function IngestTab({
     for (const item of pending) {
       setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
       try {
-        await api.topics.ingestFile(topicId, item.file)
+        await api.topics.ingestFile(topicId, item.file, item.context || undefined)
         setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onDocumentIngested()
         broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
@@ -534,7 +542,7 @@ function IngestTab({
     for (const item of pending) {
       setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
       try {
-        await api.topics.ingestUrl(topicId, item.url)
+        await api.topics.ingestUrl(topicId, item.url, item.context || undefined)
         setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onDocumentIngested()
         broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
@@ -576,7 +584,7 @@ function IngestTab({
     for (const item of pending) {
       setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'uploading' } : i))
       try {
-        await api.topics.ingestImage(topicId, item.file)
+        await api.topics.ingestImage(topicId, item.file, item.context || undefined)
         setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'done' } : i))
         onImageIngested()
         broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
@@ -670,20 +678,44 @@ function IngestTab({
         {fileQueue.length > 0 && (
           <div className="mt-4 space-y-1">
             {fileQueue.map(item => (
-              <div key={item.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-900 text-sm">
-                <QueueStatusIcon status={item.status} />
-                <span className="flex-1 truncate text-ink-100 min-w-0">{item.file.name}</span>
-                <span className="text-xs text-ink-500 shrink-0">{formatBytes(item.file.size)}</span>
-                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
-                {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
-                <button
-                  onClick={() => setFileQueue(prev => prev.filter(i => i.id !== item.id))}
-                  disabled={item.status === 'uploading'}
-                  className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
-                  aria-label="Remove"
-                >
-                  ×
-                </button>
+              <div key={item.id} className="rounded-lg bg-ink-900 text-sm">
+                <div className="flex items-center gap-3 px-3 py-2">
+                  <QueueStatusIcon status={item.status} />
+                  <span className="flex-1 truncate text-ink-100 min-w-0">{item.file.name}</span>
+                  <span className="text-xs text-ink-500 shrink-0">{formatBytes(item.file.size)}</span>
+                  {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
+                  {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
+                  <button
+                    onClick={() => toggleContext(item.id)}
+                    disabled={item.status !== 'pending'}
+                    className="text-ink-600 hover:text-amber-400 disabled:opacity-30 shrink-0"
+                    aria-label="Add context"
+                    title="Add context note"
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setFileQueue(prev => prev.filter(i => i.id !== item.id))}
+                    disabled={item.status === 'uploading'}
+                    className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
+                    aria-label="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+                {contextOpen.has(item.id) && (
+                  <textarea
+                    className="input text-xs resize-none mt-1 ml-7 w-[calc(100%-1.75rem)]"
+                    rows={2}
+                    placeholder="Add context… (optional)"
+                    maxLength={1000}
+                    value={item.context ?? ''}
+                    onChange={e => setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, context: e.target.value } : i))}
+                    disabled={item.status !== 'pending'}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -747,19 +779,43 @@ function IngestTab({
         {urlQueue.length > 0 && (
           <div className="mt-4 space-y-1">
             {urlQueue.map(item => (
-              <div key={item.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-ink-900 text-sm">
-                <QueueStatusIcon status={item.status} />
-                <span className="flex-1 truncate text-ink-100 min-w-0 max-w-xs" title={item.url}>{item.url}</span>
-                {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
-                {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
-                <button
-                  onClick={() => setUrlQueue(prev => prev.filter(i => i.id !== item.id))}
-                  disabled={item.status === 'uploading'}
-                  className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
-                  aria-label="Remove"
-                >
-                  ×
-                </button>
+              <div key={item.id} className="rounded-lg bg-ink-900 text-sm">
+                <div className="flex items-center gap-3 px-3 py-2">
+                  <QueueStatusIcon status={item.status} />
+                  <span className="flex-1 truncate text-ink-100 min-w-0 max-w-xs" title={item.url}>{item.url}</span>
+                  {item.error && <span className="text-xs text-rose-400 shrink-0 max-w-[160px] truncate" title={item.error}>{item.error}</span>}
+                  {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
+                  <button
+                    onClick={() => toggleContext(item.id)}
+                    disabled={item.status !== 'pending'}
+                    className="text-ink-600 hover:text-amber-400 disabled:opacity-30 shrink-0"
+                    aria-label="Add context"
+                    title="Add context note"
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setUrlQueue(prev => prev.filter(i => i.id !== item.id))}
+                    disabled={item.status === 'uploading'}
+                    className="text-ink-600 hover:text-rose-400 disabled:opacity-30 shrink-0 leading-none"
+                    aria-label="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
+                {contextOpen.has(item.id) && (
+                  <textarea
+                    className="input text-xs resize-none mt-1 ml-7 w-[calc(100%-1.75rem)]"
+                    rows={2}
+                    placeholder="Add context… (optional)"
+                    maxLength={1000}
+                    value={item.context ?? ''}
+                    onChange={e => setUrlQueue(prev => prev.map(i => i.id === item.id ? { ...i, context: e.target.value } : i))}
+                    disabled={item.status !== 'pending'}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -834,7 +890,7 @@ function IngestTab({
         {imageQueue.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-3">
             {imageQueue.map(item => (
-              <div key={item.id} className="flex flex-col items-center gap-1.5 p-2 rounded-lg bg-ink-900 w-28">
+              <div key={item.id} className="flex flex-col items-center gap-1.5 p-2 rounded-lg bg-ink-900 w-36">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={item.previewUrl} alt={item.file.name} className="h-12 w-12 object-cover rounded" />
                 <span className="text-xs text-ink-200 truncate w-full text-center" title={item.file.name}>{item.file.name}</span>
@@ -844,6 +900,16 @@ function IngestTab({
                   {item.jobId && item.jobStatus && <JobStatusBadge jobStatus={item.jobStatus} />}
                 </div>
                 {item.error && <span className="text-xs text-rose-400 text-center" title={item.error}>{item.error}</span>}
+                {item.status === 'pending' && (
+                  <textarea
+                    className="input text-xs resize-none w-full"
+                    rows={2}
+                    placeholder="Context… (optional)"
+                    maxLength={1000}
+                    value={item.context ?? ''}
+                    onChange={e => setImageQueue(prev => prev.map(i => i.id === item.id ? { ...i, context: e.target.value } : i))}
+                  />
+                )}
                 <button
                   onClick={() => removeImageFromQueue(item.id)}
                   disabled={item.status === 'uploading'}
@@ -1033,9 +1099,148 @@ function SearchTab({
   )
 }
 
+// ── Links Tab ─────────────────────────────────────────────────────────────────
+
+function LinksTab({
+  topicId,
+  allTopics,
+  addToast,
+}: {
+  topicId: string
+  allTopics: Topic[]
+  addToast: (msg: string, type: 'success' | 'error') => void
+}) {
+  const [links, setLinks] = useState<Topic[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showModal, setShowModal] = useState(false)
+  const [selectedId, setSelectedId] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [removingId, setRemovingId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    api.topics.links(topicId)
+      .then(d => { if (!cancelled) { setLinks(d); setLoading(false) } })
+      .catch(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [topicId])
+
+  const linkedIds = new Set(links.map(t => t.id))
+  const available = allTopics.filter(t => t.id !== topicId && !linkedIds.has(t.id))
+
+  const handleAdd = async () => {
+    if (!selectedId || adding) return
+    setAdding(true)
+    try {
+      const linked = await api.topics.addLink(topicId, selectedId)
+      setLinks(prev => [...prev, linked])
+      addToast('Topic linked', 'success')
+      setShowModal(false)
+      setSelectedId('')
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'Failed to link topic', 'error')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const handleRemove = async (otherId: string) => {
+    setRemovingId(otherId)
+    try {
+      await api.topics.removeLink(topicId, otherId)
+      setLinks(prev => prev.filter(t => t.id !== otherId))
+      addToast('Link removed', 'success')
+    } catch {
+      addToast('Failed to remove link', 'error')
+    } finally {
+      setRemovingId(null)
+    }
+  }
+
+  if (loading) return (
+    <div className="space-y-3">
+      <SkeletonBlock className="h-12 w-full" />
+      <SkeletonBlock className="h-12 w-full" />
+    </div>
+  )
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="label-eyebrow">Linked Topics</p>
+        <button onClick={() => setShowModal(true)} className="btn-primary text-sm" disabled={available.length === 0}>
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Add link
+        </button>
+      </div>
+
+      {links.length === 0 ? (
+        <div className="empty">
+          <p>No linked topics yet. Links help group related domains together.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {links.map(t => (
+            <div key={t.id} className="card p-4 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-medium text-ink-100 truncate">{t.name}</p>
+                {t.description && <p className="text-xs text-ink-500 mt-0.5 line-clamp-2">{t.description}</p>}
+              </div>
+              <button
+                onClick={() => handleRemove(t.id)}
+                disabled={removingId === t.id}
+                className="text-ink-600 hover:text-rose-400 disabled:opacity-40 shrink-0"
+                aria-label="Remove link"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink-975/60 backdrop-blur-sm"
+          onClick={e => { if (e.target === e.currentTarget) setShowModal(false) }}
+        >
+          <div className="card w-full max-w-sm p-6 space-y-4">
+            <h2 className="text-base font-semibold text-ink-50">Link a topic</h2>
+            <select
+              className="input w-full"
+              value={selectedId}
+              onChange={e => setSelectedId(e.target.value)}
+            >
+              <option value="">Select a topic…</option>
+              {available.map(t => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowModal(false)} className="btn-secondary" disabled={adding}>Cancel</button>
+              <button onClick={handleAdd} className="btn-primary min-w-[80px]" disabled={!selectedId || adding}>
+                {adding ? (
+                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-9-9" />
+                  </svg>
+                ) : 'Link'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type Tab = 'index' | 'entities' | 'documents' | 'images' | 'ingest' | 'search'
+type Tab = 'index' | 'entities' | 'documents' | 'images' | 'ingest' | 'search' | 'links'
 
 export default function TopicDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [topicId, setTopicId] = useState<string | null>(null)
@@ -1045,6 +1250,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
   const [entities, setEntities] = useState<Entity[]>([])
   const [documents, setDocuments] = useState<Document[] | null>(null)
   const [images, setImages] = useState<Image[] | null>(null)
+  const [allTopics, setAllTopics] = useState<Topic[]>([])
   const [loading, setLoading] = useState(true)
   const [activeSubtopicId, setActiveSubtopicId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<Tab>('index')
@@ -1067,16 +1273,18 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
     setLoading(true)
     setLoadError(null)
     try {
-      const [topicData, subtopicsData, indexData, entitiesData] = await Promise.all([
+      const [topicData, subtopicsData, indexData, entitiesData, allTopicsData] = await Promise.all([
         api.topics.get(id),
         api.topics.subtopics(id),
         api.topics.index(id),
         api.topics.entities(id, subtopicFilter ?? undefined),
+        api.topics.list(),
       ])
       setTopic(topicData)
       setSubtopics(subtopicsData)
       setTopicIndex(indexData)
       setEntities(entitiesData)
+      setAllTopics(allTopicsData)
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load topic')
     } finally {
@@ -1187,6 +1395,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
     { key: 'images', label: 'Images' },
     { key: 'ingest', label: 'Ingest' },
     { key: 'search', label: 'Search' },
+    { key: 'links', label: 'Links' },
   ]
 
   function renderTabContent() {
@@ -1252,6 +1461,9 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
           }}
         />
       )
+    }
+    if (activeTab === 'links' && topicId) {
+      return <LinksTab topicId={topicId} allTopics={allTopics} addToast={addToast} />
     }
     return null
   }
