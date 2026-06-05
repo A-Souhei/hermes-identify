@@ -1,8 +1,7 @@
 'use client'
 
 import React from 'react'
-import { Image } from '@/lib/api'
-import { api } from '@/lib/api'
+import { Image, api } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
 
 interface Props {
@@ -13,14 +12,26 @@ interface Props {
 
 export function Lightbox({ images, initialIndex, onClose }: Props) {
   const [idx, setIdx] = React.useState(initialIndex)
+  const [errored, setErrored] = React.useState(false)
+  const closeRef = React.useRef<HTMLButtonElement>(null)
   const image = images[idx]
 
   const prev = () => setIdx((i) => Math.max(0, i - 1))
   const next = () => setIdx((i) => Math.min(images.length - 1, i + 1))
 
+  React.useEffect(() => { setErrored(false) }, [idx])
+
+  React.useEffect(() => {
+    const previously = document.activeElement as HTMLElement | null
+    closeRef.current?.focus()
+    return () => { previously?.focus() }
+  }, [])
+
   React.useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { onClose(); return }
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if (e.key === 'ArrowLeft') prev()
       if (e.key === 'ArrowRight') next()
     }
@@ -32,16 +43,18 @@ export function Lightbox({ images, initialIndex, onClose }: Props) {
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image viewer"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       onClick={onClose}
     >
-      {/* Content panel — stop propagation so clicking inside doesn't close */}
       <div
         className="relative flex flex-col items-center max-w-4xl w-full mx-4 max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Close button */}
         <button
+          ref={closeRef}
           onClick={onClose}
           className="absolute -top-10 right-0 text-ink-400 hover:text-ink-50 transition-colors"
           aria-label="Close"
@@ -51,15 +64,20 @@ export function Lightbox({ images, initialIndex, onClose }: Props) {
           </svg>
         </button>
 
-        {/* Image */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={api.images.contentUrl(image.id)}
-          alt={image.filename}
-          className="max-h-[70vh] max-w-full object-contain rounded-lg shadow-2xl"
-        />
+        {errored ? (
+          <div className="flex items-center justify-center h-48 w-full rounded-lg bg-ink-900 text-ink-500 text-sm">
+            Failed to load image
+          </div>
+        ) : (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={api.images.contentUrl(image.id)}
+            alt={image.filename}
+            onError={() => setErrored(true)}
+            className="max-h-[70vh] max-w-full object-contain rounded-lg shadow-2xl"
+          />
+        )}
 
-        {/* Caption */}
         <div className="mt-4 text-center px-4">
           <p className="text-ink-50 font-medium truncate">{image.filename}</p>
           {image.description && (
@@ -68,11 +86,9 @@ export function Lightbox({ images, initialIndex, onClose }: Props) {
           <p className="text-ink-600 text-xs mt-1">{relativeTime(image.created_at)}</p>
         </div>
 
-        {/* Counter */}
         <p className="text-ink-500 text-xs mt-2">{idx + 1} / {images.length}</p>
       </div>
 
-      {/* Prev arrow */}
       {idx > 0 && (
         <button
           onClick={(e) => { e.stopPropagation(); prev() }}
@@ -85,7 +101,6 @@ export function Lightbox({ images, initialIndex, onClose }: Props) {
         </button>
       )}
 
-      {/* Next arrow */}
       {idx < images.length - 1 && (
         <button
           onClick={(e) => { e.stopPropagation(); next() }}

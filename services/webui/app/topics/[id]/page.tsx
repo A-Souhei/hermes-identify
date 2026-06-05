@@ -839,6 +839,7 @@ export default function TopicDetailPage({ params }: { params: Promise<{ id: stri
 
       {lightboxIndex !== null && images && (
         <Lightbox
+          key={lightboxIndex}
           images={images}
           initialIndex={lightboxIndex}
           onClose={() => setLightboxIndex(null)}

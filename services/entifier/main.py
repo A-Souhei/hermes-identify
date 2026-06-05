@@ -129,7 +129,8 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...)):
     db.add(doc)
     await db.flush()
 
-    minio_key = f"{topic_id}/documents/{doc.id}/{file.filename}"
+    safe_name = Path(file.filename or "file").name
+    minio_key = f"{topic_id}/documents/{doc.id}/{safe_name}"
     await storage.upload_file(minio_key, content, _CONTENT_TYPES[suffix])
     doc.minio_key = minio_key
 
@@ -205,7 +206,8 @@ async def ingest_image(topic_id: str, db: DB, file: UploadFile = File(...)):
     db.add(img)
     await db.flush()
 
-    minio_key = f"{topic_id}/images/{img.id}/{file.filename}"
+    safe_img_name = Path(file.filename or "image").name
+    minio_key = f"{topic_id}/images/{img.id}/{safe_img_name}"
     await storage.upload_file(minio_key, content, content_type)
     img.minio_key = minio_key
     img.file_path = minio_key
@@ -272,7 +274,8 @@ async def get_image_content(image_id: str, db: DB):
         ".webp": "image/webp",
         ".gif": "image/gif",
     }.get(suffix, "image/png")
-    return Response(content=content, media_type=media_type)
+    return Response(content=content, media_type=media_type,
+                    headers={"X-Content-Type-Options": "nosniff"})
 
 
 # ── Background job runner ─────────────────────────────────────────────────────
