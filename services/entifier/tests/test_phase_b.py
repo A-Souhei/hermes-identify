@@ -88,6 +88,45 @@ class TestParsePdf:
             await parse_pdf(b"not a pdf")
 
 
+class TestParseCsv:
+    def test_returns_decoded_text(self):
+        from ingestor import parse_csv
+        csv_bytes = b"name,age\nAlice,30\nBob,25"
+        result = parse_csv(csv_bytes)
+        assert "name,age" in result
+        assert "Alice,30" in result
+
+    def test_strips_whitespace(self):
+        from ingestor import parse_csv
+        assert parse_csv(b"  a,b  ") == "a,b"
+
+
+class TestParseJson:
+    def test_pretty_prints_valid_json(self):
+        from ingestor import parse_json
+        result = parse_json(b'{"key": "value", "num": 42}')
+        assert '"key": "value"' in result
+        assert '"num": 42' in result
+
+    def test_invalid_json_falls_back_to_raw(self):
+        from ingestor import parse_json
+        raw = b"not valid json at all"
+        assert parse_json(raw) == "not valid json at all"
+
+
+class TestParseYaml:
+    def test_returns_decoded_text(self):
+        from ingestor import parse_yaml
+        yaml_bytes = b"key: value\nlist:\n  - a\n  - b"
+        result = parse_yaml(yaml_bytes)
+        assert "key: value" in result
+        assert "- a" in result
+
+    def test_strips_whitespace(self):
+        from ingestor import parse_yaml
+        assert parse_yaml(b"  key: val  ") == "key: val"
+
+
 # ── Ingest file endpoint ─────────────────────────────────────────────────────
 
 class TestIngestFile:
@@ -116,6 +155,50 @@ class TestIngestFile:
         )
         assert r.status_code == 201
         assert r.json()["filename"] == "report.pdf"
+
+    async def test_ingest_csv_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("data.csv", b"col1,col2\nval1,val2", "text/csv")},
+        )
+        assert r.status_code == 201
+        assert r.json()["filename"] == "data.csv"
+
+    async def test_ingest_json_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("config.json", b'{"key": "value"}', "application/json")},
+        )
+        assert r.status_code == 201
+        assert r.json()["filename"] == "config.json"
+
+    async def test_ingest_yaml_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("spec.yaml", b"key: value\n", "application/yaml")},
+        )
+        assert r.status_code == 201
+        assert r.json()["filename"] == "spec.yaml"
+
+    async def test_ingest_yml_creates_document(self, client: AsyncClient, mock_externals):
+        topic_r = await client.post("/topics", json={"name": "T"})
+        tid = topic_r.json()["id"]
+
+        r = await client.post(
+            f"/topics/{tid}/ingest/file",
+            files={"file": ("spec.yml", b"key: value\n", "application/yaml")},
+        )
+        assert r.status_code == 201
+        assert r.json()["filename"] == "spec.yml"
 
     async def test_unsupported_format_returns_422(self, client: AsyncClient, mock_externals):
         topic_r = await client.post("/topics", json={"name": "T"})

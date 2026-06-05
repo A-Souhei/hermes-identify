@@ -48,7 +48,16 @@ from models import (
     TopicOut,
 )
 
-ALLOWED_DOC_EXTENSIONS = {".pdf", ".md"}
+ALLOWED_DOC_EXTENSIONS = {".pdf", ".md", ".csv", ".json", ".yaml", ".yml"}
+
+_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+}
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
@@ -121,15 +130,20 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...)):
     await db.flush()
 
     minio_key = f"{topic_id}/documents/{doc.id}/{file.filename}"
-    content_type = "application/pdf" if suffix == ".pdf" else "text/markdown"
-    await storage.upload_file(minio_key, content, content_type)
+    await storage.upload_file(minio_key, content, _CONTENT_TYPES[suffix])
     doc.minio_key = minio_key
 
-    from ingestor import chunk_text, parse_md, parse_pdf
+    from ingestor import chunk_text, parse_csv, parse_json, parse_md, parse_pdf, parse_yaml
 
     if suffix == ".pdf":
         text, page_count = await parse_pdf(content)
         doc.page_count = page_count
+    elif suffix == ".json":
+        text = parse_json(content)
+    elif suffix in {".yaml", ".yml"}:
+        text = parse_yaml(content)
+    elif suffix == ".csv":
+        text = parse_csv(content)
     else:
         text = parse_md(content)
 

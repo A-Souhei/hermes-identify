@@ -2,7 +2,7 @@
 
 Document ingestion, classification, and entity extraction service for the hermes-docwriter plugin.
 
-Ingest PDFs, Markdown files, URLs, and images — the service classifies them into sub-topics, extracts named entities, groups them into document sections, and exposes everything via a REST API.
+Ingest PDFs, Markdown, CSV, JSON, YAML files, URLs, and images — the service classifies them into sub-topics, extracts named entities, groups them into document sections, and exposes everything via a REST API.
 
 ## Stack
 
@@ -38,7 +38,7 @@ API is available at `http://localhost:37491`. No authentication.
 
 ```
 POST   /topics                          create topic
-POST   /topics/{id}/ingest/file         upload PDF or MD
+POST   /topics/{id}/ingest/file         upload PDF, MD, CSV, JSON, or YAML
 POST   /topics/{id}/ingest/url          crawl URL via Firecrawl
 POST   /topics/{id}/ingest/image        upload image (PNG/JPG/WEBP/GIF)
 POST   /topics/{id}/process             run full pipeline → job_id

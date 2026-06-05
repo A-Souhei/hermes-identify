@@ -1,4 +1,5 @@
 import io
+import json as _json
 
 import httpx
 from pypdf import PdfReader
@@ -14,6 +15,22 @@ async def parse_pdf(content: bytes) -> tuple[str, int]:
 
 
 def parse_md(content: bytes) -> str:
+    return content.decode("utf-8", errors="replace").strip()
+
+
+def parse_csv(content: bytes) -> str:
+    return content.decode("utf-8", errors="replace").strip()
+
+
+def parse_json(content: bytes) -> str:
+    try:
+        data = _json.loads(content.decode("utf-8", errors="replace"))
+        return _json.dumps(data, indent=2, ensure_ascii=False)
+    except _json.JSONDecodeError:
+        return content.decode("utf-8", errors="replace").strip()
+
+
+def parse_yaml(content: bytes) -> str:
     return content.decode("utf-8", errors="replace").strip()
 
 
