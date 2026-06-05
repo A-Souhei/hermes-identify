@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, Topic, TopicIndex } from '@/lib/api'
+import CatalogueGraph from '@/components/CatalogueGraph'
 
 const ENTITY_TYPE_COLORS: Record<string, { dot: string; label: string }> = {
   concept:      { dot: 'bg-blue-400',   label: 'text-blue-300' },
@@ -21,6 +22,7 @@ export default function CataloguePage() {
   const [topics, setTopics] = useState<Topic[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [view, setView] = useState<'tree' | 'graph'>('tree')
 
   const [indexCache, setIndexCache] = useState<Record<string, TopicIndex>>({})
   const [indexLoading, setIndexLoading] = useState<Record<string, boolean>>({})
@@ -219,8 +221,28 @@ export default function CataloguePage() {
         </div>
       </div>
 
+      {/* Tab bar */}
+      {topics.length > 0 && !loading && (
+        <div className="flex items-center gap-1 mb-6">
+          <button
+            onClick={() => setView('tree')}
+            className={['px-3 py-1.5 rounded-lg text-sm font-medium transition-colors', view === 'tree' ? 'bg-amber-400/10 text-amber-400' : 'btn-ghost'].join(' ')}
+          >
+            Tree
+          </button>
+          <button
+            onClick={() => setView('graph')}
+            className={['px-3 py-1.5 rounded-lg text-sm font-medium transition-colors', view === 'graph' ? 'bg-amber-400/10 text-amber-400' : 'btn-ghost'].join(' ')}
+          >
+            Graph
+          </button>
+        </div>
+      )}
+
       {/* Content */}
-      {loading ? (
+      {view === 'graph' && topics.length > 0 ? (
+        <CatalogueGraph topics={topics} />
+      ) : loading ? (
         <div className="space-y-2">
           <SkeletonRow />
           <SkeletonRow />
