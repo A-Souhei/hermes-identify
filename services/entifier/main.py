@@ -37,6 +37,7 @@ from models import (
     SectionIndexItem,
     SectionOut,
     SectionPatch,
+    SmartIngestResult,
     SourceType,
     SubTopic,
     SubTopicIndexItem,
@@ -110,36 +111,32 @@ async def get_topic(topic_id: str, db: DB):
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
 
-@app.post("/topics/{topic_id}/ingest/file", response_model=DocumentOut, status_code=201)
-async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
-    if context and len(context) > 1000:
-        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
-    topic = await db.get(Topic, topic_id)
-    if not topic:
-        raise HTTPException(status_code=404, detail="topic not found")
-
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in ALLOWED_DOC_EXTENSIONS:
-        raise HTTPException(status_code=422, detail=f"unsupported file type: {suffix}")
-
-    content = await file.read()
+async def _do_ingest_file(
+    topic_id: str,
+    filename: str,
+    content: bytes,
+    context: Optional[str],
+    db: AsyncSession,
+) -> Document:
+    """Core file ingest logic shared by ingest_file and smart_ingest_file."""
+    suffix = Path(filename).suffix.lower()
 
     doc = Document(
         topic_id=topic_id,
         source_type=SourceType.FILE,
-        source_ref=file.filename or "unknown",
-        filename=file.filename,
+        source_ref=filename,
+        filename=filename,
+        context=context or None,
     )
-    doc.context = context or None
     db.add(doc)
     await db.flush()
 
-    safe_name = Path(file.filename or "file").name
+    safe_name = Path(filename).name
     minio_key = f"{topic_id}/documents/{doc.id}/{safe_name}"
     await storage.upload_file(minio_key, content, _CONTENT_TYPES[suffix])
     doc.minio_key = minio_key
 
-    from ingestor import chunk_text, parse_csv, parse_json, parse_md, parse_pdf, parse_yaml
+    from ingestor import parse_csv, parse_json, parse_md, parse_pdf, parse_yaml
 
     if suffix == ".pdf":
         text, page_count = await parse_pdf(content)
@@ -158,6 +155,104 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...), conte
 
     await _store_chunks(text, doc.id, topic_id, db, context=doc.context)
     return doc
+
+
+@app.post("/topics/{topic_id}/ingest/file", response_model=DocumentOut, status_code=201)
+async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
+    if context and len(context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in ALLOWED_DOC_EXTENSIONS:
+        raise HTTPException(status_code=422, detail=f"unsupported file type: {suffix}")
+
+    content = await file.read()
+    filename = file.filename or "unknown"
+    return await _do_ingest_file(topic_id, filename, content, context, db)
+
+
+MAX_SMART_INGEST_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_FILES_PER_REQUEST = 20
+
+@app.post("/smart-ingest/file", response_model=SmartIngestResult, status_code=201)
+async def smart_ingest_file(db: DB, file: UploadFile = File(...), context: Optional[str] = Form(None)):
+    if context and len(context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
+
+    # Sanitise filename — strip any directory components from client-supplied name
+    filename = Path(file.filename or "unknown").name or "unknown"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".md"}:
+        raise HTTPException(status_code=422, detail=f"unsupported file type: {suffix or '(none)'}")
+
+    content = await file.read()
+    if len(content) > MAX_SMART_INGEST_SIZE:
+        raise HTTPException(status_code=413, detail="file too large (max 50 MB)")
+
+    from ingestor import parse_md, parse_pdf
+
+    if suffix == ".pdf":
+        text, _ = await parse_pdf(content)
+    else:
+        text = parse_md(content)
+    preview = text[:1500]
+
+    topics_result = await db.execute(select(Topic).order_by(Topic.created_at))
+    all_topics = topics_result.scalars().all()
+    existing_topics = [
+        {"id": t.id, "name": t.name, "description": t.description}
+        for t in all_topics
+    ]
+
+    import smart_classifier
+    classification = await smart_classifier.classify_topic(filename, preview, existing_topics)
+
+    topic_id: Optional[str] = None
+    was_created = False
+
+    if classification["action"] == "existing" and classification["topic_id"]:
+        topic_id = classification["topic_id"]
+        topic = await db.get(Topic, topic_id)
+        if not topic:
+            # LLM hallucinated an id — fall through to create
+            classification["action"] = "new"
+            topic_id = None
+
+    if classification["action"] == "new":
+        # Truncate LLM-supplied strings before storing
+        topic_name = (classification.get("topic_name") or Path(filename).stem)[:200].strip()
+        raw_desc = (classification.get("topic_description") or "")[:1000].strip()
+        topic_description: Optional[str] = raw_desc or None
+
+        # Avoid duplicate topics if a same-named topic was created concurrently
+        existing_same = await db.execute(select(Topic).where(Topic.name == topic_name))
+        existing_topic = existing_same.scalar_one_or_none()
+        if existing_topic:
+            topic_id = existing_topic.id
+        else:
+            new_topic = Topic(name=topic_name, description=topic_description)
+            db.add(new_topic)
+            await db.flush()
+            topic_id = new_topic.id
+            was_created = True
+
+    assert topic_id is not None, "topic resolution failed"
+
+    doc = await _do_ingest_file(topic_id, filename, content, context, db)
+
+    topic_record = await db.get(Topic, topic_id)
+    topic_name_out = topic_record.name if topic_record else topic_id
+
+    return SmartIngestResult(
+        topic_id=topic_id,
+        topic_name=topic_name_out,
+        was_created=was_created,
+        document_id=doc.id,
+        filename=filename,
+    )
 
 
 @app.post("/topics/{topic_id}/ingest/url", response_model=DocumentOut, status_code=201)

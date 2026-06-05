@@ -374,3 +374,11 @@ class ImageSearchHit(BaseModel):
 class SearchResponse(BaseModel):
     entities: list[EntitySearchHit]
     images: list[ImageSearchHit]
+
+
+class SmartIngestResult(BaseModel):
+    topic_id: str
+    topic_name: str
+    was_created: bool
+    document_id: str
+    filename: str
