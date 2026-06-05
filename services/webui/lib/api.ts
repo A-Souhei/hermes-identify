@@ -78,6 +78,35 @@ export interface Job {
   completed_at: string | null
 }
 
+export interface Document {
+  id: string
+  topic_id: string
+  source_type: 'file' | 'url'
+  source_ref: string
+  filename: string | null
+  page_count: number | null
+  minio_key: string | null
+  created_at: string
+}
+
+export interface Image {
+  id: string
+  topic_id: string
+  filename: string
+  description: string | null
+  minio_key: string | null
+  created_at: string
+}
+
+async function upload<T>(path: string, formData: FormData): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData })
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText)
+    throw new Error(`${res.status}: ${text}`)
+  }
+  return res.json() as Promise<T>
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -94,6 +123,21 @@ export const api = {
       ),
     index: (id: string) => request<TopicIndex>(`/topics/${encodeURIComponent(id)}/index`),
     process: (id: string) => request<Job>(`/topics/${encodeURIComponent(id)}/process`, { method: 'POST' }),
+    documents: (id: string) => request<Document[]>(`/topics/${encodeURIComponent(id)}/documents`),
+    images: (id: string) => request<Image[]>(`/topics/${encodeURIComponent(id)}/images`),
+    ingestFile: (id: string, file: File) => {
+      const fd = new FormData(); fd.append('file', file)
+      return upload<Document>(`/topics/${encodeURIComponent(id)}/ingest/file`, fd)
+    },
+    ingestUrl: (id: string, url: string) =>
+      request<Document>(`/topics/${encodeURIComponent(id)}/ingest/url`, {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+      }),
+    ingestImage: (id: string, file: File) => {
+      const fd = new FormData(); fd.append('file', file)
+      return upload<Image>(`/topics/${encodeURIComponent(id)}/ingest/image`, fd)
+    },
   },
   jobs: {
     get: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),

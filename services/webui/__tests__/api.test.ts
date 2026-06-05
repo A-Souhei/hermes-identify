@@ -87,6 +87,45 @@ describe('api.topics', () => {
     const call = (global.fetch as jest.Mock).mock.calls[0]
     expect(call[0]).toBe('/api/entifier/topics/abc/entities?subtopic_id=st%201')
   })
+
+  it('documents calls GET /api/entifier/topics/:id/documents', async () => {
+    mockFetch([])
+    await api.topics.documents('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/documents', expect.objectContaining({}))
+  })
+
+  it('images calls GET /api/entifier/topics/:id/images', async () => {
+    mockFetch([])
+    await api.topics.images('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/images', expect.objectContaining({}))
+  })
+
+  it('ingestUrl calls POST /api/entifier/topics/:id/ingest/url with url in body', async () => {
+    mockFetch({ id: 'd1', topic_id: 'abc', source_type: 'url', source_ref: 'https://example.com', filename: null, page_count: null, minio_key: null, created_at: '' })
+    await api.topics.ingestUrl('abc', 'https://example.com')
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/ingest/url')
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toMatchObject({ url: 'https://example.com' })
+  })
+
+  it('ingestFile calls POST /api/entifier/topics/:id/ingest/file with FormData body', async () => {
+    mockFetch({ id: 'd2', topic_id: 'abc', source_type: 'file', source_ref: 'doc.pdf', filename: 'doc.pdf', page_count: null, minio_key: null, created_at: '' })
+    const file = new File(['content'], 'doc.pdf', { type: 'application/pdf' })
+    await api.topics.ingestFile('abc', file)
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/ingest/file')
+    expect(call[1].body).toBeInstanceOf(FormData)
+  })
+
+  it('ingestImage calls POST /api/entifier/topics/:id/ingest/image with FormData body', async () => {
+    mockFetch({ id: 'img1', topic_id: 'abc', filename: 'photo.png', description: null, minio_key: null, created_at: '' })
+    const file = new File(['img'], 'photo.png', { type: 'image/png' })
+    await api.topics.ingestImage('abc', file)
+    const call = (global.fetch as jest.Mock).mock.calls[0]
+    expect(call[0]).toBe('/api/entifier/topics/abc/ingest/image')
+    expect(call[1].body).toBeInstanceOf(FormData)
+  })
 })
 
 describe('api.jobs', () => {
