@@ -35,6 +35,10 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s
+}
+
 function buildGraph(
   indices: Array<{ topicId: string; subtopics: Array<{ id: string; name: string }> }>,
   linkPairs: Array<[string, string]>,
@@ -168,6 +172,51 @@ export default function CatalogueGraph({ topics }: Props) {
           linkWidth={(link) => {
             const l = link as unknown as GraphLink
             return typeof l.width === 'number' ? l.width : 1
+          }}
+          nodeCanvasObjectMode={() => 'after'}
+          nodeCanvasObject={(node, ctx, globalScale) => {
+            const n = node as unknown as GraphNode & { x: number; y: number }
+            const isTopic = n.type === 'topic'
+            const fontSize = (isTopic ? 13 : 10) / globalScale
+            const label = truncate(n.name, isTopic ? 22 : 18)
+            // nodeRelSize default is 4; radius ≈ 4 * √val
+            const radius = 4 * Math.sqrt(n.val)
+            ctx.font = `${isTopic ? 'bold' : 'normal'} ${fontSize}px Sans-Serif`
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'top'
+            // subtle dark backing so text is legible over edges
+            ctx.fillStyle = 'rgba(10,9,8,0.55)'
+            const metrics = ctx.measureText(label)
+            const pad = 2 / globalScale
+            ctx.fillRect(
+              n.x - metrics.width / 2 - pad,
+              n.y + radius / globalScale + 1 / globalScale - pad,
+              metrics.width + pad * 2,
+              fontSize + pad * 2,
+            )
+            ctx.fillStyle = isTopic ? '#fbbf24' : '#a8a29e'
+            ctx.fillText(label, n.x, n.y + radius / globalScale + 1 / globalScale)
+          }}
+          linkCanvasObjectMode={(link) => {
+            const l = link as unknown as GraphLink
+            return l.width === 2 ? 'after' : undefined
+          }}
+          linkCanvasObject={(link, ctx, globalScale) => {
+            type SimNode = { x: number; y: number }
+            const l = link as unknown as GraphLink & { source: SimNode; target: SimNode }
+            if (l.width !== 2) return
+            const midX = (l.source.x + l.target.x) / 2
+            const midY = (l.source.y + l.target.y) / 2
+            const fontSize = 9 / globalScale
+            ctx.font = `${fontSize}px Sans-Serif`
+            ctx.textAlign = 'center'
+            ctx.textBaseline = 'middle'
+            ctx.fillStyle = 'rgba(10,9,8,0.55)'
+            const w = ctx.measureText('linked').width
+            const pad = 2 / globalScale
+            ctx.fillRect(midX - w / 2 - pad, midY - fontSize / 2 - pad, w + pad * 2, fontSize + pad * 2)
+            ctx.fillStyle = '#f59e0b'
+            ctx.fillText('linked', midX, midY)
           }}
           onNodeClick={(node) => {
             const n = node as unknown as GraphNode
