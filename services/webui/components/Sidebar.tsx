@@ -28,6 +28,16 @@ const NAV_ITEMS: NavItem[] = [
       </svg>
     ),
   },
+  {
+    key: 'catalogue',
+    label: 'Catalogue',
+    href: '/catalogue',
+    icon: (
+      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3v4M8 7H4a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1h4M16 7h4a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-4M8 11v2a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2M12 7h0M9 14v3M15 14v3M6 17h4M14 17h4" />
+      </svg>
+    ),
+  },
 ]
 
 export function Sidebar({ active }: { active: string }) {
