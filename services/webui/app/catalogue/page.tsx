@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, Topic, TopicIndex } from '@/lib/api'
 
 const ENTITY_TYPE_COLORS: Record<string, { dot: string; label: string }> = {
@@ -20,6 +20,7 @@ function SkeletonRow() {
 export default function CataloguePage() {
   const [topics, setTopics] = useState<Topic[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const [indexCache, setIndexCache] = useState<Record<string, TopicIndex>>({})
   const [indexLoading, setIndexLoading] = useState<Record<string, boolean>>({})
@@ -29,14 +30,32 @@ export default function CataloguePage() {
   const [subtopicsOpen, setSubtopicsOpen] = useState<Record<string, boolean>>({})
   const [sectionsOpen, setSectionsOpen] = useState<Record<string, boolean>>({})
 
+  // Sync refs for stable callbacks — avoids stale closures in useCallback deps
+  const mountedRef = useRef(true)
+  const loadingIdsRef = useRef<Set<string>>(new Set())  // sync in-flight tracker
+  const cachedIdsRef = useRef<Set<string>>(new Set())   // sync cached tracker
+  const indexCacheRef = useRef<Record<string, TopicIndex>>({})
+  const expandAllActiveRef = useRef(false)
+
+  useEffect(() => { indexCacheRef.current = indexCache }, [indexCache])
+  useEffect(() => { return () => { mountedRef.current = false } }, [])
+
+  // ── Load topics ─────────────────────────────────────────────────────────────
+
   const loadTopics = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
+    setLoadError(null)
     try {
       const data = await api.topics.list()
       if (signal?.aborted) return
       setTopics(data)
-    } catch {
+      // Invalidate index cache so fresh expands refetch
+      setIndexCache({})
+      setIndexError({})
+      cachedIdsRef.current.clear()
+    } catch (err) {
       if (signal?.aborted) return
+      setLoadError(err instanceof Error ? err.message : 'Failed to load topics')
     } finally {
       if (!signal?.aborted) setLoading(false)
     }
@@ -48,14 +67,21 @@ export default function CataloguePage() {
     return () => controller.abort()
   }, [loadTopics])
 
+  // ── Load a single topic's index ──────────────────────────────────────────────
+  // Stable callback — dedup via refs, not state, to avoid stale closure issues.
+
   const loadIndex = useCallback(async (topicId: string) => {
-    if (indexCache[topicId] || indexLoading[topicId]) return
-    setIndexLoading((prev) => ({ ...prev, [topicId]: true }))
-    setIndexError((prev) => { const n = { ...prev }; delete n[topicId]; return n })
+    if (cachedIdsRef.current.has(topicId) || loadingIdsRef.current.has(topicId)) return
+    loadingIdsRef.current.add(topicId)
+    setIndexLoading(prev => ({ ...prev, [topicId]: true }))
+    setIndexError(prev => { const n = { ...prev }; delete n[topicId]; return n })
     try {
       const data = await api.topics.index(topicId)
-      setIndexCache((prev) => ({ ...prev, [topicId]: data }))
-      setSectionsOpen((prev) => {
+      if (!mountedRef.current) return
+      cachedIdsRef.current.add(topicId)
+      setIndexCache(prev => ({ ...prev, [topicId]: data }))
+      // Sections default-open when first loaded
+      setSectionsOpen(prev => {
         const next = { ...prev }
         for (const sub of data.subtopics) {
           for (const sec of sub.sections) {
@@ -64,60 +90,78 @@ export default function CataloguePage() {
         }
         return next
       })
+      // If "Expand all" was in progress, also open these subtopics
+      if (expandAllActiveRef.current) {
+        setSubtopicsOpen(prev => {
+          const next = { ...prev }
+          for (const sub of data.subtopics) { next[sub.id] = true }
+          return next
+        })
+      }
     } catch (err) {
-      setIndexError((prev) => ({
+      if (!mountedRef.current) return
+      setIndexError(prev => ({
         ...prev,
         [topicId]: err instanceof Error ? err.message : 'Failed to load index',
       }))
     } finally {
-      setIndexLoading((prev) => { const n = { ...prev }; delete n[topicId]; return n })
+      loadingIdsRef.current.delete(topicId)
+      if (mountedRef.current) {
+        setIndexLoading(prev => { const n = { ...prev }; delete n[topicId]; return n })
+      }
     }
-  }, [indexCache, indexLoading])
+  }, []) // stable — all mutable state accessed via refs
+
+  // ── Toggle handlers ──────────────────────────────────────────────────────────
 
   const toggleTopic = useCallback((topicId: string) => {
-    setTopicsOpen((prev) => {
+    setTopicsOpen(prev => {
       const next = { ...prev, [topicId]: !prev[topicId] }
+      if (next[topicId]) loadIndex(topicId)
       return next
     })
-    if (!topicsOpen[topicId]) {
-      loadIndex(topicId)
-    }
-  }, [topicsOpen, loadIndex])
+  }, [loadIndex])
 
   const toggleSubtopic = useCallback((subtopicId: string) => {
-    setSubtopicsOpen((prev) => ({ ...prev, [subtopicId]: !prev[subtopicId] }))
+    setSubtopicsOpen(prev => ({ ...prev, [subtopicId]: !prev[subtopicId] }))
   }, [])
 
   const toggleSection = useCallback((sectionId: string) => {
-    setSectionsOpen((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }))
+    setSectionsOpen(prev => ({ ...prev, [sectionId]: !prev[sectionId] }))
   }, [])
 
+  // ── Global expand / collapse ─────────────────────────────────────────────────
+
   const expandAll = useCallback(() => {
+    expandAllActiveRef.current = true
     const nextTopics: Record<string, boolean> = {}
     const nextSubtopics: Record<string, boolean> = {}
     for (const topic of topics) {
       nextTopics[topic.id] = true
-      loadIndex(topic.id)
-      const cached = indexCache[topic.id]
+      // Open subtopics for already-cached topics synchronously
+      const cached = indexCacheRef.current[topic.id]
       if (cached) {
-        for (const sub of cached.subtopics) {
-          nextSubtopics[sub.id] = true
-        }
+        for (const sub of cached.subtopics) { nextSubtopics[sub.id] = true }
       }
+      // For uncached topics, loadIndex will open subtopics on completion (via expandAllActiveRef)
+      loadIndex(topic.id)
     }
     setTopicsOpen(nextTopics)
-    setSubtopicsOpen((prev) => ({ ...prev, ...nextSubtopics }))
-  }, [topics, indexCache, loadIndex])
+    setSubtopicsOpen(prev => ({ ...prev, ...nextSubtopics }))
+  }, [topics, loadIndex])
 
   const collapseAll = useCallback(() => {
+    expandAllActiveRef.current = false
     setTopicsOpen({})
     setSubtopicsOpen({})
     setSectionsOpen({})
   }, [])
 
   const retryIndex = useCallback((topicId: string) => {
-    setIndexError((prev) => { const n = { ...prev }; delete n[topicId]; return n })
-    setIndexLoading((prev) => { const n = { ...prev }; delete n[topicId]; return n })
+    // Clear cached/loading flags so loadIndex re-runs
+    cachedIdsRef.current.delete(topicId)
+    loadingIdsRef.current.delete(topicId)
+    setIndexError(prev => { const n = { ...prev }; delete n[topicId]; return n })
     loadIndex(topicId)
   }, [loadIndex])
 
@@ -130,34 +174,13 @@ export default function CataloguePage() {
           <p className="mt-1 text-ink-400 text-sm">Full index of all topics, subtopics, sections and entities.</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={expandAll}
-            className="btn-ghost text-xs"
-            disabled={loading}
-          >
-            Expand all
-          </button>
-          <button
-            onClick={collapseAll}
-            className="btn-ghost text-xs"
-            disabled={loading}
-          >
-            Collapse all
-          </button>
-          <button
-            onClick={() => loadTopics()}
-            className="btn-ghost"
-            title="Refresh"
-            disabled={loading}
-          >
+          <button onClick={expandAll} className="btn-ghost text-xs" disabled={loading}>Expand all</button>
+          <button onClick={collapseAll} className="btn-ghost text-xs" disabled={loading}>Collapse all</button>
+          <button onClick={() => loadTopics()} className="btn-ghost" title="Refresh" disabled={loading}>
             <svg
               className={['w-4 h-4', loading ? 'animate-spin' : ''].join(' ')}
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round"
             >
               <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
               <path d="M21 3v5h-5" />
@@ -173,6 +196,11 @@ export default function CataloguePage() {
           <SkeletonRow />
           <SkeletonRow />
           <SkeletonRow />
+        </div>
+      ) : loadError ? (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-center">
+          <p className="text-sm text-rose-300 mb-3">{loadError}</p>
+          <button className="btn-secondary text-xs" onClick={() => loadTopics()}>Retry</button>
         </div>
       ) : topics.length === 0 ? (
         <div className="empty flex flex-col items-center gap-4">
@@ -205,18 +233,12 @@ export default function CataloguePage() {
                 >
                   <svg
                     className={['w-4 h-4 shrink-0 text-ink-400 transition-transform', isOpen ? 'rotate-90' : ''].join(' ')}
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                    viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                    strokeLinecap="round" strokeLinejoin="round"
                   >
                     <path d="M9 18l6-6-6-6" />
                   </svg>
-                  {index && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
-                  )}
+                  {index && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
                   <span className="font-medium text-ink-100 flex-1 min-w-0 truncate">{topic.name}</span>
                   {topic.description && (
                     <span className="text-ink-500 text-sm truncate max-w-[280px] hidden sm:block">{topic.description}</span>
@@ -268,12 +290,8 @@ export default function CataloguePage() {
                           >
                             <svg
                               className={['w-3.5 h-3.5 shrink-0 text-ink-500 transition-transform', subOpen ? 'rotate-90' : ''].join(' ')}
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
+                              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                              strokeLinecap="round" strokeLinejoin="round"
                             >
                               <path d="M9 18l6-6-6-6" />
                             </svg>
@@ -293,7 +311,8 @@ export default function CataloguePage() {
                               )}
 
                               {sub.sections.map((sec) => {
-                                const secOpen = sectionsOpen[sec.id] !== false
+                                // Sections seed to true in loadIndex; !!undefined = false (closed after collapseAll)
+                                const secOpen = !!sectionsOpen[sec.id]
 
                                 return (
                                   <div key={sec.id} className="ml-4 pl-4 border-l border-ink-800">
@@ -306,12 +325,8 @@ export default function CataloguePage() {
                                     >
                                       <svg
                                         className={['w-3 h-3 shrink-0 text-ink-600 transition-transform', secOpen ? 'rotate-90' : ''].join(' ')}
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
+                                        viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                                        strokeLinecap="round" strokeLinejoin="round"
                                       >
                                         <path d="M9 18l6-6-6-6" />
                                       </svg>
@@ -330,19 +345,14 @@ export default function CataloguePage() {
                                           <p className="text-xs italic text-ink-600">No entities</p>
                                         ) : (
                                           sec.entities.map((ent) => {
-                                            const colors = ent.entity_type
-                                              ? ENTITY_TYPE_COLORS[ent.entity_type]
-                                              : undefined
+                                            const colors = ent.entity_type ? ENTITY_TYPE_COLORS[ent.entity_type] : undefined
                                             return (
                                               <span
                                                 key={ent.id}
                                                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-ink-800 text-ink-200 text-xs font-mono"
+                                                title={ent.entity_type ?? undefined}
                                               >
-                                                {colors ? (
-                                                  <span className={['w-1.5 h-1.5 rounded-full shrink-0', colors.dot].join(' ')} />
-                                                ) : (
-                                                  <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-ink-500" />
-                                                )}
+                                                <span className={['w-1.5 h-1.5 rounded-full shrink-0', colors ? colors.dot : 'bg-ink-500'].join(' ')} />
                                                 <span className={colors ? colors.label : 'text-ink-400'}>{ent.name}</span>
                                               </span>
                                             )
