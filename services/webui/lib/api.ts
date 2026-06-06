@@ -41,6 +41,7 @@ export interface Entity {
   description: string | null
   entity_type: string | null
   created_at: string
+  with_image: boolean
 }
 
 export interface EntityIndexItem {

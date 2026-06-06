@@ -34,6 +34,11 @@ function BlockCard({
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${BLOCK_BADGE[block.block_type] ?? 'bg-ink-700 text-ink-300'}`}>
             {block.block_type}
           </span>
+          {block.block_type === 'entity' && block.meta.with_image && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 shrink-0">
+              img
+            </span>
+          )}
         </div>
         <p className="text-ink-100 text-sm font-medium truncate">{block.label}</p>
         {typeof block.meta.description === 'string' && block.meta.description && (

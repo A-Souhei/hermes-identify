@@ -1,5 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from embedder import embed_texts, search_vectors
 from models import Chunk, Entity, Image
@@ -30,6 +31,7 @@ async def semantic_search(topic_id: str, query: str, limit: int, db: AsyncSessio
                 select(Entity)
                 .join(ce_table, Entity.id == ce_table.c.entity_id)
                 .where(ce_table.c.chunk_id == point_id)
+                .options(selectinload(Entity.images))
             )
             for ent in ent_res.scalars().all():
                 if ent.id not in entity_scores or entity_scores[ent.id]["score"] < score:

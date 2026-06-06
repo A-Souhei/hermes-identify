@@ -520,7 +520,7 @@ async def list_entities(topic_id: str, db: DB, subtopic_id: Optional[str] = None
     q = select(Entity).where(Entity.topic_id == topic_id)
     if subtopic_id:
         q = q.where(Entity.subtopic_id == subtopic_id)
-    result = await db.execute(q.order_by(Entity.created_at))
+    result = await db.execute(q.options(selectinload(Entity.images)).order_by(Entity.created_at))
     return result.scalars().all()
 
 
@@ -551,8 +551,10 @@ async def patch_entity(entity_id: str, body: EntityPatch, db: DB):
     if body.subtopic_id is not None:
         entity.subtopic_id = body.subtopic_id
     await db.commit()
-    await db.refresh(entity)
-    return entity
+    result = await db.execute(
+        select(Entity).where(Entity.id == entity_id).options(selectinload(Entity.images))
+    )
+    return result.scalar_one()
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
@@ -807,7 +809,10 @@ async def _resolve_block(block: DossierBlock, db: AsyncSession) -> DossierBlockR
                 "order_index": obj.order_index,
             }
     elif bt == "entity":
-        obj = await db.get(Entity, ref_id)
+        ent_result = await db.execute(
+            select(Entity).where(Entity.id == ref_id).options(selectinload(Entity.images))
+        )
+        obj = ent_result.scalar_one_or_none()
         if obj:
             label = obj.name
             meta = {
@@ -815,6 +820,7 @@ async def _resolve_block(block: DossierBlock, db: AsyncSession) -> DossierBlockR
                 "entity_type": obj.entity_type.value if obj.entity_type is not None else None,
                 "subtopic_id": obj.subtopic_id,
                 "section_id": obj.section_id,
+                "with_image": bool(obj.images),
             }
     elif bt == "image":
         obj = await db.get(Image, ref_id)
