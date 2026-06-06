@@ -41,6 +41,7 @@ export interface Entity {
   description: string | null
   entity_type: string | null
   created_at: string
+  with_image: boolean
 }
 
 export interface EntityIndexItem {
@@ -48,6 +49,7 @@ export interface EntityIndexItem {
   ref_id: string
   name: string
   entity_type: string | null
+  with_image: boolean
 }
 
 export interface SectionIndexItem {

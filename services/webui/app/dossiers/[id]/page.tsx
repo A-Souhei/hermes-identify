@@ -34,6 +34,11 @@ function BlockCard({
           <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${BLOCK_BADGE[block.block_type] ?? 'bg-ink-700 text-ink-300'}`}>
             {block.block_type}
           </span>
+          {block.block_type === 'entity' && !!block.meta.with_image && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 shrink-0">
+              img
+            </span>
+          )}
         </div>
         <p className="text-ink-100 text-sm font-medium truncate">{block.label}</p>
         {typeof block.meta.description === 'string' && block.meta.description && (
@@ -154,6 +159,7 @@ function TopicTree({
               {expandedSections.has(sec.id) && sec.entities.map((ent) => (
                 <div key={ent.id} className="ml-3 border-l border-ink-700/60 pl-3 flex items-center gap-2 py-1">
                   <span className="flex-1 text-ink-400 text-xs truncate">{ent.name}</span>
+                  {ent.with_image && <span className="text-rose-400 text-xs shrink-0" title="has image">▪</span>}
                   <button
                     onClick={() => onAdd('entity', ent.id)}
                     disabled={added.has(ent.id)}

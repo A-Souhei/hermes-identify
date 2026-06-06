@@ -520,7 +520,7 @@ async def list_entities(topic_id: str, db: DB, subtopic_id: Optional[str] = None
     q = select(Entity).where(Entity.topic_id == topic_id)
     if subtopic_id:
         q = q.where(Entity.subtopic_id == subtopic_id)
-    result = await db.execute(q.order_by(Entity.created_at))
+    result = await db.execute(q.options(selectinload(Entity.images)).order_by(Entity.created_at))
     return result.scalars().all()
 
 
@@ -551,8 +551,13 @@ async def patch_entity(entity_id: str, body: EntityPatch, db: DB):
     if body.subtopic_id is not None:
         entity.subtopic_id = body.subtopic_id
     await db.commit()
-    await db.refresh(entity)
-    return entity
+    result = await db.execute(
+        select(Entity).where(Entity.id == entity_id).options(selectinload(Entity.images))
+    )
+    updated = result.scalar_one_or_none()
+    if not updated:
+        raise HTTPException(status_code=404, detail="entity not found")
+    return updated
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
@@ -598,7 +603,7 @@ async def get_topic_index(topic_id: str, db: DB):
         select(SubTopic)
         .where(SubTopic.topic_id == topic_id)
         .options(
-            selectinload(SubTopic.sections).selectinload(Section.entities)
+            selectinload(SubTopic.sections).selectinload(Section.entities).selectinload(Entity.images)
         )
         .order_by(SubTopic.created_at)
     )
@@ -624,6 +629,7 @@ async def get_topic_index(topic_id: str, db: DB):
                                 ref_id=e.ref_id,
                                 name=e.name,
                                 entity_type=e.entity_type,
+                                with_image=bool(e.images),
                             )
                             for e in sorted(s.entities, key=lambda x: x.created_at)
                         ],
@@ -807,7 +813,10 @@ async def _resolve_block(block: DossierBlock, db: AsyncSession) -> DossierBlockR
                 "order_index": obj.order_index,
             }
     elif bt == "entity":
-        obj = await db.get(Entity, ref_id)
+        ent_result = await db.execute(
+            select(Entity).where(Entity.id == ref_id).options(selectinload(Entity.images))
+        )
+        obj = ent_result.scalar_one_or_none()
         if obj:
             label = obj.name
             meta = {
@@ -815,6 +824,7 @@ async def _resolve_block(block: DossierBlock, db: AsyncSession) -> DossierBlockR
                 "entity_type": obj.entity_type.value if obj.entity_type is not None else None,
                 "subtopic_id": obj.subtopic_id,
                 "section_id": obj.section_id,
+                "with_image": bool(obj.images),
             }
     elif bt == "image":
         obj = await db.get(Image, ref_id)

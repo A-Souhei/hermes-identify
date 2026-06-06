@@ -5,7 +5,7 @@ from typing import Optional
 
 from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from db import Base
 
@@ -270,6 +270,29 @@ class EntityOut(BaseModel):
     description: Optional[str]
     entity_type: Optional[EntityType]
     created_at: datetime
+    with_image: bool = False
+
+    @model_validator(mode='before')
+    @classmethod
+    def _compute_with_image(cls, data):
+        if not isinstance(data, dict) and hasattr(data, 'images'):
+            try:
+                imgs = data.images
+                return {
+                    'id': data.id,
+                    'ref_id': data.ref_id,
+                    'topic_id': data.topic_id,
+                    'subtopic_id': data.subtopic_id,
+                    'section_id': data.section_id,
+                    'name': data.name,
+                    'description': data.description,
+                    'entity_type': data.entity_type,
+                    'created_at': data.created_at,
+                    'with_image': bool(imgs),
+                }
+            except Exception:
+                pass
+        return data
 
 
 class EntityPatch(BaseModel):
@@ -316,6 +339,7 @@ class EntityIndexItem(BaseModel):
     ref_id: str
     name: str
     entity_type: Optional[EntityType]
+    with_image: bool = False
 
 
 class SectionIndexItem(BaseModel):
