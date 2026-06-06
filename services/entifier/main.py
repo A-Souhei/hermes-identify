@@ -554,7 +554,10 @@ async def patch_entity(entity_id: str, body: EntityPatch, db: DB):
     result = await db.execute(
         select(Entity).where(Entity.id == entity_id).options(selectinload(Entity.images))
     )
-    return result.scalar_one()
+    updated = result.scalar_one_or_none()
+    if not updated:
+        raise HTTPException(status_code=404, detail="entity not found")
+    return updated
 
 
 # ── Sections ──────────────────────────────────────────────────────────────────
