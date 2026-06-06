@@ -28,6 +28,7 @@ from models import (
     DossierDetail,
     DossierOut,
     DossierPatch,
+    DossierRenderBlock,
     Entity,
     EntityDetailOut,
     EntityIndexItem,
@@ -875,6 +876,62 @@ async def get_dossier(dossier_id: str, db: DB):
         updated_at=dossier.updated_at,
         blocks=blocks,
     )
+
+
+@app.get("/dossiers/{dossier_id}/render", response_model=list[DossierRenderBlock])
+async def render_dossier(dossier_id: str, db: DB):
+    result = await db.execute(
+        select(Dossier).where(Dossier.id == dossier_id).options(selectinload(Dossier.blocks))
+    )
+    dossier = result.scalar_one_or_none()
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+
+    rendered: list[DossierRenderBlock] = []
+    for block in sorted(dossier.blocks, key=lambda b: b.order_index):
+        bt = block.block_type
+        ref = block.ref_id
+
+        if bt == "subtopic":
+            obj = await db.get(SubTopic, ref)
+            rendered.append(DossierRenderBlock(
+                block_id=block.id, block_type=bt,
+                label=obj.name if obj else "(deleted)",
+            ))
+
+        elif bt == "section":
+            obj = await db.get(Section, ref)
+            rendered.append(DossierRenderBlock(
+                block_id=block.id, block_type=bt,
+                label=obj.name if obj else "(deleted)",
+            ))
+
+        elif bt == "entity":
+            ent_res = await db.execute(
+                select(Entity).where(Entity.id == ref).options(selectinload(Entity.chunks))
+            )
+            obj = ent_res.scalar_one_or_none()
+            if obj:
+                chunks = sorted(obj.chunks, key=lambda c: c.chunk_index)
+                paragraphs = [c.content for c in chunks]
+            else:
+                paragraphs = []
+            rendered.append(DossierRenderBlock(
+                block_id=block.id, block_type=bt,
+                label=obj.name if obj else "(deleted)",
+                paragraphs=paragraphs,
+            ))
+
+        elif bt == "image":
+            obj = await db.get(Image, ref)
+            rendered.append(DossierRenderBlock(
+                block_id=block.id, block_type=bt,
+                label=obj.filename if obj else "(deleted)",
+                paragraphs=[obj.description] if obj and obj.description else [],
+                image_id=ref if obj else None,
+            ))
+
+    return rendered
 
 
 @app.patch("/dossiers/{dossier_id}", response_model=DossierOut)

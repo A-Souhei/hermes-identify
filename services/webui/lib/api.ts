@@ -159,6 +159,14 @@ export interface DossierDetail extends DossierOut {
   blocks: DossierBlockResolved[]
 }
 
+export interface DossierRenderBlock {
+  block_id: string
+  block_type: string
+  label: string
+  paragraphs: string[]
+  image_id: string | null
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -253,5 +261,6 @@ export const api = {
         `/dossiers/${encodeURIComponent(id)}/blocks/${encodeURIComponent(blockId)}`,
         { method: 'PATCH', body: JSON.stringify({ order_index }) }
       ),
+    render: (id: string) => request<DossierRenderBlock[]>(`/dossiers/${encodeURIComponent(id)}/render`),
   },
 }
