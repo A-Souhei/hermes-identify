@@ -410,6 +410,9 @@ export default function CataloguePage() {
                                               >
                                                 <span className={['w-1.5 h-1.5 rounded-full shrink-0', colors ? colors.dot : 'bg-ink-500'].join(' ')} />
                                                 <span className={colors ? colors.label : 'text-ink-400'}>{ent.name}</span>
+                                                {ent.with_image && (
+                                                  <span className="ml-0.5 text-rose-400" title="has image">▪</span>
+                                                )}
                                               </span>
                                             )
                                           })

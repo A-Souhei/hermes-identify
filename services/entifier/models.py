@@ -339,6 +339,7 @@ class EntityIndexItem(BaseModel):
     ref_id: str
     name: str
     entity_type: Optional[EntityType]
+    with_image: bool = False
 
 
 class SectionIndexItem(BaseModel):

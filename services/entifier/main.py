@@ -603,7 +603,7 @@ async def get_topic_index(topic_id: str, db: DB):
         select(SubTopic)
         .where(SubTopic.topic_id == topic_id)
         .options(
-            selectinload(SubTopic.sections).selectinload(Section.entities)
+            selectinload(SubTopic.sections).selectinload(Section.entities).selectinload(Entity.images)
         )
         .order_by(SubTopic.created_at)
     )
@@ -629,6 +629,7 @@ async def get_topic_index(topic_id: str, db: DB):
                                 ref_id=e.ref_id,
                                 name=e.name,
                                 entity_type=e.entity_type,
+                                with_image=bool(e.images),
                             )
                             for e in sorted(s.entities, key=lambda x: x.created_at)
                         ],

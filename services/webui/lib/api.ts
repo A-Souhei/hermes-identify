@@ -49,6 +49,7 @@ export interface EntityIndexItem {
   ref_id: string
   name: string
   entity_type: string | null
+  with_image: boolean
 }
 
 export interface SectionIndexItem {
