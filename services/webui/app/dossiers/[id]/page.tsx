@@ -177,6 +177,71 @@ function TopicTree({
   )
 }
 
+function DossierPreview({ blocks }: { blocks: DossierBlockResolved[] }) {
+  if (blocks.length === 0) {
+    return <p className="text-ink-500 text-sm text-center py-16">No blocks — add content in the editor.</p>
+  }
+  return (
+    <div className="max-w-3xl mx-auto space-y-8">
+      {blocks.map((block) => {
+        if (block.block_type === 'subtopic') {
+          return (
+            <div key={block.id} className="border-b border-ink-800 pb-4">
+              <h2 className="text-xl font-bold text-ink-50">{block.label}</h2>
+              {typeof block.meta.description === 'string' && block.meta.description && (
+                <p className="mt-1 text-ink-400 text-sm">{block.meta.description}</p>
+              )}
+            </div>
+          )
+        }
+        if (block.block_type === 'section') {
+          return (
+            <div key={block.id}>
+              <h3 className="text-base font-semibold text-ink-200 mb-1">{block.label}</h3>
+              {typeof block.meta.description === 'string' && block.meta.description && (
+                <p className="text-ink-500 text-sm">{block.meta.description}</p>
+              )}
+            </div>
+          )
+        }
+        if (block.block_type === 'entity') {
+          return (
+            <div key={block.id} className="surface border border-ink-700/60 rounded-xl px-4 py-3">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm font-medium text-ink-100">{block.label}</span>
+                {typeof block.meta.entity_type === 'string' && block.meta.entity_type && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-sky-400/20 text-sky-300">
+                    {block.meta.entity_type}
+                  </span>
+                )}
+                {!!block.meta.with_image && <span className="text-rose-400 text-xs" title="has image">▪</span>}
+              </div>
+              {typeof block.meta.description === 'string' && block.meta.description && (
+                <p className="text-ink-400 text-sm">{block.meta.description}</p>
+              )}
+            </div>
+          )
+        }
+        if (block.block_type === 'image') {
+          return (
+            <div key={block.id} className="flex flex-col items-center gap-2">
+              <img
+                src={api.images.contentUrl(block.ref_id)}
+                alt={block.label}
+                className="rounded-xl max-w-full max-h-[60vh] object-contain"
+              />
+              {typeof block.meta.description === 'string' && block.meta.description && (
+                <p className="text-ink-500 text-xs italic text-center">{block.meta.description}</p>
+              )}
+            </div>
+          )
+        }
+        return null
+      })}
+    </div>
+  )
+}
+
 export default function DossierDetailPage() {
   const params = useParams()
   const router = useRouter()
@@ -186,6 +251,7 @@ export default function DossierDetailPage() {
   const [topicIndices, setTopicIndices] = useState<TopicIndex[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<'edit' | 'preview'>('edit')
 
   const [editingName, setEditingName] = useState(false)
   const [nameValue, setNameValue] = useState('')
@@ -319,6 +385,24 @@ export default function DossierDetailPage() {
         )}
       </div>
 
+      <div className="flex items-center gap-1 mb-6">
+        <button
+          onClick={() => setView('edit')}
+          className={['px-3 py-1.5 rounded-lg text-sm font-medium transition-colors', view === 'edit' ? 'bg-amber-400/10 text-amber-400' : 'btn-ghost'].join(' ')}
+        >
+          Edit
+        </button>
+        <button
+          onClick={() => setView('preview')}
+          className={['px-3 py-1.5 rounded-lg text-sm font-medium transition-colors', view === 'preview' ? 'bg-amber-400/10 text-amber-400' : 'btn-ghost'].join(' ')}
+        >
+          Preview
+        </button>
+      </div>
+
+      {view === 'preview' ? (
+        <DossierPreview blocks={dossier.blocks} />
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left panel — hierarchy browser */}
         <div>
@@ -361,6 +445,7 @@ export default function DossierDetailPage() {
           </div>
         </div>
       </div>
+      )}
     </main>
   )
 }
