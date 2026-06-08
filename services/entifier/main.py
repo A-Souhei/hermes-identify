@@ -1034,7 +1034,9 @@ _QUAD_STAR_RE = _re.compile(r'\*{4,}')
 _DOUBLE_DOT_RE = _re.compile(r'(?<!\.)\.\.(?!\.)')
 _MULTI_NEWLINE_RE = _re.compile(r'\n{3,}')
 # A line made up entirely of markdown-structural punctuation (e.g. ">***", "***", "---").
-_ARTIFACT_LINE_RE = _re.compile(r'[>*_~.\-`|\s]+')
+# Note: '|' is intentionally excluded so GFM table rows/separators ("| --- | --- |")
+# are never dropped — removing the separator row breaks table rendering.
+_ARTIFACT_LINE_RE = _re.compile(r'[>*_~.\-`\s]+')
 _ATX_HEADING_RE = _re.compile(r'#{1,6}\s+\S.*')
 _PSEUDO_HEADING_RE = _re.compile(r'\*{3}(.+?)\*{3}')
 

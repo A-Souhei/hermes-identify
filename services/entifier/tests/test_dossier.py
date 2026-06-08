@@ -268,6 +268,15 @@ class TestCleanMarkdown:
         from main import _clean_markdown
         assert "****" not in _clean_markdown("### **8****.2 Impact**")
 
+    def test_preserves_gfm_table_separator(self):
+        from main import _clean_markdown
+        # The "| --- | --- |" separator row must survive or the table breaks.
+        table = "| A | B |\n| --- | --- |\n| 1 | 2 |"
+        result = _clean_markdown(table)
+        assert "| --- | --- |" in result
+        assert "| A | B |" in result
+        assert "| 1 | 2 |" in result
+
 
 class TestMergeIntervals:
     def test_empty(self):
