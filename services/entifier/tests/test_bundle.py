@@ -224,3 +224,19 @@ class TestRewriteAssetLinks:
         }
         result = _rewrite_asset_links("![b](./images/b.png)", "doc-3", assets_by_doc)
         assert result == "![b](/documents/doc-3/assets/asset-3/content)"
+
+    def test_angle_bracket_path_with_spaces(self):
+        from main import _rewrite_asset_links
+
+        class _FakeAsset:
+            id = "asset-4"
+
+        assets_by_doc = {"doc-4": {"images/my image.png": _FakeAsset()}}
+        result = _rewrite_asset_links("![c](<images/my image.png>)", "doc-4", assets_by_doc)
+        assert result == "![c](/documents/doc-4/assets/asset-4/content)"
+
+    def test_image_inside_code_fence_left_untouched(self):
+        from main import _rewrite_asset_links
+
+        md = "```\n![x](images/a.png)\n```"
+        assert _rewrite_asset_links(md, "doc-1", {}) == md

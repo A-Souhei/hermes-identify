@@ -113,7 +113,7 @@ class DocumentAsset(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
     document_id: Mapped[str] = mapped_column(String, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    topic_id: Mapped[str] = mapped_column(String, ForeignKey("topics.id"), nullable=False)
+    topic_id: Mapped[str] = mapped_column(String, ForeignKey("topics.id", ondelete="CASCADE"), nullable=False)
     rel_path: Mapped[str] = mapped_column(String, nullable=False)
     minio_key: Mapped[str] = mapped_column(String, nullable=False)
     content_type: Mapped[str] = mapped_column(String, nullable=False)

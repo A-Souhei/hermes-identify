@@ -209,6 +209,7 @@ _ASSET_CONTENT_TYPES = {
 
 MAX_BUNDLE_SIZE = 100 * 1024 * 1024        # 100 MB compressed
 MAX_BUNDLE_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MB uncompressed
+MAX_BUNDLE_ENTRY_SIZE = 25 * 1024 * 1024   # 25 MB per file (uncompressed)
 MAX_BUNDLE_ENTRIES = 1000
 
 
@@ -245,6 +246,10 @@ async def ingest_bundle(
     total_uncompressed = sum(e.file_size for e in entries)
     if total_uncompressed > MAX_BUNDLE_UNCOMPRESSED:
         raise HTTPException(status_code=413, detail="bundle uncompressed content too large (max 200 MB)")
+    # zipfile.read() enforces each entry's declared size, so the per-entry cap below
+    # is trustworthy and bounds peak memory for any single file.
+    if any(e.file_size > MAX_BUNDLE_ENTRY_SIZE for e in entries):
+        raise HTTPException(status_code=413, detail="a file in the bundle is too large (max 25 MB each)")
 
     def _is_safe_entry(name: str) -> bool:
         """Reject absolute paths, path traversal, Windows drive letters, backslashes."""
@@ -262,56 +267,52 @@ async def ingest_bundle(
 
     safe_entries = [e for e in entries if not e.is_dir() and _is_safe_entry(e.filename)]
 
-    # Find the shallowest markdown file
-    md_entry = None
-    for e in safe_entries:
-        suffix = Path(e.filename).suffix.lower()
-        if suffix in {".md", ".markdown"}:
-            depth = e.filename.count('/')
-            if md_entry is None or depth < md_entry.filename.count('/'):
-                md_entry = e
-
-    if md_entry is None:
+    # Pick the markdown file: shallowest, then alphabetical (deterministic across
+    # zip tools/OSes when several share the minimum depth).
+    md_candidates = sorted(
+        (e for e in safe_entries if Path(e.filename).suffix.lower() in {".md", ".markdown"}),
+        key=lambda e: (e.filename.count('/'), e.filename),
+    )
+    if not md_candidates:
         raise HTTPException(status_code=422, detail="no markdown file in bundle")
+    md_entry = md_candidates[0]
 
     md_bytes = zf.read(md_entry.filename)
-    md_basename = Path(md_entry.filename).name
+    # Normalise extension to .md so downstream content-type lookup never KeyErrors on .markdown.
+    md_basename = Path(md_entry.filename).stem + ".md"
     doc = await _do_ingest_file(topic_id, md_basename, md_bytes, context, db)
 
     # Parent directory of the markdown entry (posix, may be empty string)
     md_parent = posixpath.dirname(md_entry.filename)
 
-    asset_count = 0
+    # Gather image assets, upload them all, then persist rows in a single commit so a
+    # mid-upload failure can't leave a half-populated asset set in the DB.
+    pending: list[tuple[str, str, bytes, str]] = []
     for e in safe_entries:
         if e.filename == md_entry.filename:
             continue
         suffix = Path(e.filename).suffix.lower()
         if suffix not in ALLOWED_IMAGE_EXTENSIONS:
             continue
-
-        ct = _ASSET_CONTENT_TYPES.get(suffix, "image/png")
-        # Relative path from the markdown file's directory
-        if md_parent:
-            rel = posixpath.relpath(e.filename, md_parent)
-        else:
-            rel = e.filename
-
-        asset_bytes = zf.read(e.filename)
+        rel = posixpath.relpath(e.filename, md_parent) if md_parent else e.filename
         minio_key = f"{topic_id}/documents/{doc.id}/assets/{rel}"
+        ct = _ASSET_CONTENT_TYPES.get(suffix, "image/png")
+        pending.append((rel, minio_key, zf.read(e.filename), ct))
+
+    for rel, minio_key, asset_bytes, ct in pending:
         await storage.upload_file(minio_key, asset_bytes, ct)
 
-        asset = DocumentAsset(
+    for rel, minio_key, _bytes, ct in pending:
+        db.add(DocumentAsset(
             document_id=doc.id,
             topic_id=topic_id,
             rel_path=rel,
             minio_key=minio_key,
             content_type=ct,
-        )
-        db.add(asset)
-        asset_count += 1
+        ))
 
     await db.commit()
-    return BundleIngestResult(document=DocumentOut.model_validate(doc), asset_count=asset_count)
+    return BundleIngestResult(document=DocumentOut.model_validate(doc), asset_count=len(pending))
 
 
 @app.get("/documents/{document_id}/assets/{asset_id}/content")
@@ -327,7 +328,10 @@ async def get_document_asset_content(document_id: str, asset_id: str, db: DB):
     asset = result.scalar_one_or_none()
     if not asset:
         raise HTTPException(status_code=404, detail="asset not found")
-    asset_bytes = await storage.download_file(asset.minio_key)
+    try:
+        asset_bytes = await storage.download_file(asset.minio_key)
+    except Exception:
+        raise HTTPException(status_code=404, detail="asset content not available")
     return Response(
         content=asset_bytes,
         media_type=asset.content_type,
@@ -1259,9 +1263,12 @@ def _clean_markdown(text: str) -> str:
     return text.strip()
 
 
+# Matches ![alt](path) — supports angle-bracket paths with spaces (<my image.png>),
+# bare paths, and an optional "title".
 _MD_IMAGE_RE = _re.compile(
-    r'!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)'
+    r'!\[([^\]]*)\]\(\s*(?:<([^>]*)>|([^)\s]+))(?:\s+"[^"]*")?\s*\)'
 )
+_FENCE_RE = _re.compile(r'^\s*(```|~~~)')
 
 
 def _rewrite_asset_links(
@@ -1274,12 +1281,13 @@ def _rewrite_asset_links(
     - Mapped assets → /documents/{doc_id}/assets/{asset.id}/content
     - Unmapped local images → *alt* (italic caption placeholder, no broken img)
     - External http(s):// URLs → left untouched
+    - References inside fenced code blocks are left verbatim
     """
     doc_assets = assets_by_doc.get(doc_id, {})
 
     def _replace(m: "_re.Match") -> str:
         alt = m.group(1)
-        src = m.group(2)
+        src = m.group(2) if m.group(2) is not None else m.group(3)
 
         # Leave external URLs alone
         if src.startswith("http://") or src.startswith("https://"):
@@ -1293,7 +1301,7 @@ def _rewrite_asset_links(
 
         asset = doc_assets.get(normalized)
         if asset is None:
-            # Fallback: try basename
+            # Fallback: try basename (only present when unambiguous)
             asset = doc_assets.get(posixpath.basename(normalized))
 
         if asset is not None:
@@ -1302,7 +1310,15 @@ def _rewrite_asset_links(
         # No asset found — render as italic caption so no broken image shows
         return f"*{alt}*" if alt else ""
 
-    return _MD_IMAGE_RE.sub(_replace, md)
+    out_lines: list[str] = []
+    in_fence = False
+    for line in md.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            out_lines.append(line)
+        else:
+            out_lines.append(line if in_fence else _MD_IMAGE_RE.sub(_replace, line))
+    return "\n".join(out_lines)
 
 
 @app.get("/dossiers/{dossier_id}/render", response_model=list[DossierRenderBlock])
@@ -1330,10 +1346,18 @@ async def render_dossier(dossier_id: str, db: DB):
         )
         assets = res.scalars().all()
         lookup: dict = {}
+        basename_counts: dict = {}
         for a in assets:
             norm = posixpath.normpath(a.rel_path)
             lookup[norm] = a
-            lookup[posixpath.basename(norm)] = a
+            bn = posixpath.basename(norm)
+            basename_counts[bn] = basename_counts.get(bn, 0) + 1
+        # Only register a basename fallback when it's unambiguous, so a reference
+        # by bare filename can't silently resolve to the wrong asset.
+        for a in assets:
+            bn = posixpath.basename(posixpath.normpath(a.rel_path))
+            if basename_counts[bn] == 1:
+                lookup.setdefault(bn, a)
         assets_by_doc[doc_id] = lookup
 
     rendered: list[DossierRenderBlock] = []
