@@ -105,6 +105,21 @@ class Document(Base):
 
     topic: Mapped["Topic"] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    assets: Mapped[list["DocumentAsset"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+
+class DocumentAsset(Base):
+    __tablename__ = "document_assets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_id)
+    document_id: Mapped[str] = mapped_column(String, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    topic_id: Mapped[str] = mapped_column(String, ForeignKey("topics.id", ondelete="CASCADE"), nullable=False)
+    rel_path: Mapped[str] = mapped_column(String, nullable=False)
+    minio_key: Mapped[str] = mapped_column(String, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    document: Mapped["Document"] = relationship(back_populates="assets")
 
 
 class Chunk(Base):
@@ -406,6 +421,20 @@ class SmartIngestResult(BaseModel):
     was_created: bool
     document_id: str
     filename: str
+
+
+class DocumentAssetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    document_id: str
+    rel_path: str
+    content_type: str
+    created_at: datetime
+
+
+class BundleIngestResult(BaseModel):
+    document: DocumentOut
+    asset_count: int
 
 
 # ── Dossier models ────────────────────────────────────────────────────────────

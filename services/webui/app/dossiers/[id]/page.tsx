@@ -236,6 +236,31 @@ function TopicTree({
   )
 }
 
+// Custom img renderer: rewrite /documents/... asset paths through the API proxy.
+// External URLs are rendered as-is. No rehype-raw needed.
+const markdownComponents = {
+  img({ src, alt }: React.ImgHTMLAttributes<HTMLImageElement>) {
+    const srcStr = typeof src === 'string' ? src : ''
+    const resolvedSrc = srcStr.startsWith('/documents/')
+      ? `/api/entifier${srcStr}`
+      : srcStr
+    return (
+      <figure className="flex flex-col items-center gap-2 my-6">
+        <img
+          src={resolvedSrc}
+          alt={alt ?? ''}
+          className="rounded-lg max-w-full max-h-[60vh] object-contain mx-auto"
+        />
+        {alt && (
+          <figcaption className="text-ink-500 text-xs italic text-center max-w-lg">
+            {alt}
+          </figcaption>
+        )}
+      </figure>
+    )
+  },
+}
+
 function DossierPreview({ dossierId }: { dossierId: string }) {
   const [blocks, setBlocks] = useState<DossierRenderBlock[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -264,7 +289,7 @@ function DossierPreview({ dossierId }: { dossierId: string }) {
             <div key={block.block_id}>
               <h2 className="first:mt-0">{block.label}</h2>
               {block.paragraphs.map((p, i) => (
-                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>{p}</ReactMarkdown>
               ))}
             </div>
           )
@@ -274,7 +299,7 @@ function DossierPreview({ dossierId }: { dossierId: string }) {
             <div key={block.block_id}>
               <h3>{block.label}</h3>
               {block.paragraphs.map((p, i) => (
-                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>{p}</ReactMarkdown>
               ))}
             </div>
           )
@@ -284,7 +309,7 @@ function DossierPreview({ dossierId }: { dossierId: string }) {
           return (
             <div key={block.block_id}>
               {block.paragraphs.map((p, i) => (
-                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>{p}</ReactMarkdown>
               ))}
             </div>
           )
