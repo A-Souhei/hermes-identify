@@ -183,6 +183,7 @@ export const api = {
       ),
     index: (id: string) => request<TopicIndex>(`/topics/${encodeURIComponent(id)}/index`),
     process: (id: string) => request<Job>(`/topics/${encodeURIComponent(id)}/process`, { method: 'POST' }),
+    activeJob: (id: string) => request<Job | null>(`/topics/${encodeURIComponent(id)}/active-job`),
     documents: (id: string) => request<Document[]>(`/topics/${encodeURIComponent(id)}/documents`),
     images: (id: string) => request<Image[]>(`/topics/${encodeURIComponent(id)}/images`),
     ingestFile: (id: string, file: File, context?: string) => {

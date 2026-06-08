@@ -242,21 +242,14 @@ class TestPatchEntity:
 class TestFullPipelineWithEntities:
     async def test_process_creates_entities(self, test_engine, db_session, mock_entify_llm):
         from main import _run_process_job
-        from sqlalchemy import select
-
-        # Mock classifier functions so only entify runs with the real code
-        discover_mock = AsyncMock(return_value=[
-            SubTopic(id="st-int", topic_id="topic-int", name="Climate Science", description="Sci")
-        ])
-        assign_mock = AsyncMock()
+        from models import chunk_subtopics
+        from sqlalchemy import insert, select
 
         topic = Topic(id="topic-int", name="T")
         db_session.add(topic)
         doc = Document(id="doc-int", topic_id="topic-int",
                        source_type=SourceType.FILE, source_ref="f.md", filename="f.md")
         db_session.add(doc)
-        st = SubTopic(id="st-int", topic_id="topic-int", name="Climate Science", description="Sci")
-        db_session.add(st)
         job = Job(id="job-int", topic_id="topic-int", type="process", status=JobStatus.PENDING)
         db_session.add(job)
 
@@ -267,20 +260,23 @@ class TestFullPipelineWithEntities:
         ]
         for c in chunks:
             db_session.add(c)
-
-        from models import chunk_subtopics
-        from sqlalchemy import insert
         await db_session.flush()
-        for c in chunks:
-            await db_session.execute(
-                insert(chunk_subtopics).values(chunk_id=c.id, subtopic_id="st-int")
-            )
         await db_session.commit()
+
+        # discover/assign run inside the job (after the re-process cleanup), so they
+        # must create the subtopic and chunk assignments rather than rely on pre-seeded rows.
+        async def fake_discover(chunks_arg, topic_id, db):
+            st = SubTopic(id="st-int", topic_id=topic_id, name="Climate Science", description="Sci")
+            db.add(st)
+            await db.flush()
+            for c in chunks_arg:
+                await db.execute(insert(chunk_subtopics).values(chunk_id=c.id, subtopic_id="st-int"))
+            return [st]
 
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         with (
-            patch("classifier.discover_subtopics", discover_mock),
-            patch("classifier.assign_chunks_to_subtopics", assign_mock),
+            patch("classifier.discover_subtopics", side_effect=fake_discover),
+            patch("classifier.assign_chunks_to_subtopics", new_callable=AsyncMock),
             patch("main.indexer_mod.index_all_subtopics", new_callable=AsyncMock),
         ):
             await _run_process_job("job-int", session_factory=session_factory)
@@ -293,3 +289,99 @@ class TestFullPipelineWithEntities:
         )).scalars().all()
         assert len(entities) == 2
         assert all(e.ref_id.startswith("ENT-") for e in entities)
+
+
+# ── Re-process cleanup ────────────────────────────────────────────────────────
+
+class TestClearTopicDerivedData:
+    async def test_clears_derived_keeps_sources(self, db_session):
+        from main import _clear_topic_derived_data
+        from models import Image, Section, chunk_entities, chunk_subtopics, image_entities
+        from sqlalchemy import insert, select
+
+        topic = Topic(id="topic-clr", name="T")
+        doc = Document(id="doc-clr", topic_id="topic-clr",
+                       source_type=SourceType.FILE, source_ref="f.md", filename="f.md")
+        chunk = Chunk(id="ch-clr", document_id="doc-clr", topic_id="topic-clr",
+                      content="text", chunk_index=0)
+        image = Image(id="img-clr", topic_id="topic-clr", filename="i.png", file_path="k")
+        st = SubTopic(id="st-clr", topic_id="topic-clr", name="S", description="d")
+        sec = Section(id="sec-clr", topic_id="topic-clr", subtopic_id="st-clr", name="Sec")
+        ent = Entity(id="ent-clr", topic_id="topic-clr", subtopic_id="st-clr",
+                     section_id="sec-clr", name="E", ref_id="ENT-000001")
+        for obj in (topic, doc, chunk, image, st, sec, ent):
+            db_session.add(obj)
+        await db_session.flush()
+        await db_session.execute(insert(chunk_entities).values(chunk_id="ch-clr", entity_id="ent-clr"))
+        await db_session.execute(insert(image_entities).values(image_id="img-clr", entity_id="ent-clr"))
+        await db_session.execute(insert(chunk_subtopics).values(chunk_id="ch-clr", subtopic_id="st-clr"))
+        await db_session.commit()
+
+        await _clear_topic_derived_data("topic-clr", db_session)
+        await db_session.commit()
+
+        # Derived data gone
+        assert (await db_session.execute(select(Entity).where(Entity.topic_id == "topic-clr"))).scalars().all() == []
+        assert (await db_session.execute(select(Section).where(Section.topic_id == "topic-clr"))).scalars().all() == []
+        assert (await db_session.execute(select(SubTopic).where(SubTopic.topic_id == "topic-clr"))).scalars().all() == []
+        assert (await db_session.execute(select(chunk_entities))).all() == []
+        assert (await db_session.execute(select(image_entities))).all() == []
+        assert (await db_session.execute(select(chunk_subtopics))).all() == []
+
+        # Source data preserved
+        assert (await db_session.execute(select(Chunk).where(Chunk.topic_id == "topic-clr"))).scalars().all() != []
+        assert (await db_session.execute(select(Document).where(Document.topic_id == "topic-clr"))).scalars().all() != []
+        assert (await db_session.execute(select(Image).where(Image.topic_id == "topic-clr"))).scalars().all() != []
+
+    async def test_reprocess_does_not_duplicate_subtopics(self, test_engine, db_session, mock_entify_llm):
+        """Running the pipeline twice must replace, not append, derived data."""
+        from main import _run_process_job
+        from sqlalchemy import select
+
+        topic = Topic(id="topic-rp", name="T")
+        db_session.add(topic)
+        doc = Document(id="doc-rp", topic_id="topic-rp",
+                       source_type=SourceType.FILE, source_ref="f.md", filename="f.md")
+        db_session.add(doc)
+        chunks = [
+            Chunk(id=f"ch-rp-{i}", document_id="doc-rp", topic_id="topic-rp",
+                  content=f"text {i}", chunk_index=i)
+            for i in range(2)
+        ]
+        for c in chunks:
+            db_session.add(c)
+        await db_session.flush()
+        await db_session.commit()
+
+        # discover_subtopics creates one fresh subtopic + assigns chunks to it
+        async def fake_discover(chunks_arg, topic_id, db):
+            from models import SubTopic as ST, chunk_subtopics as cst
+            from sqlalchemy import insert
+            st = ST(topic_id=topic_id, name="Climate Science", description="Sci")
+            db.add(st)
+            await db.flush()
+            for c in chunks_arg:
+                await db.execute(insert(cst).values(chunk_id=c.id, subtopic_id=st.id))
+            return [st]
+
+        session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
+
+        async def run_once():
+            job = Job(topic_id="topic-rp", type="process", status=JobStatus.PENDING)
+            db_session.add(job)
+            await db_session.commit()
+            jid = job.id
+            with (
+                patch("classifier.discover_subtopics", side_effect=fake_discover),
+                patch("classifier.assign_chunks_to_subtopics", new_callable=AsyncMock),
+                patch("main.indexer_mod.index_all_subtopics", new_callable=AsyncMock),
+            ):
+                await _run_process_job(jid, session_factory=session_factory)
+
+        await run_once()
+        first = (await db_session.execute(select(SubTopic).where(SubTopic.topic_id == "topic-rp"))).scalars().all()
+        assert len(first) == 1
+
+        await run_once()
+        second = (await db_session.execute(select(SubTopic).where(SubTopic.topic_id == "topic-rp"))).scalars().all()
+        assert len(second) == 1, "re-process must not duplicate subtopics"

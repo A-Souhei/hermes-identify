@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -17,6 +17,8 @@ from models import (
     _now,
     Chunk,
     ChunkSummary,
+    chunk_entities,
+    chunk_subtopics,
     Document,
     DocumentOut,
     Dossier,
@@ -36,6 +38,7 @@ from models import (
     EntityPatch,
     EntitySearchHit,
     Image,
+    image_entities,
     ImageOut,
     ImageSearchHit,
     IngestUrlRequest,
@@ -416,6 +419,26 @@ async def get_image_content(image_id: str, db: DB):
 
 # ── Background job runner ─────────────────────────────────────────────────────
 
+async def _clear_topic_derived_data(topic_id: str, db: AsyncSession) -> None:
+    """Remove derived artifacts (subtopics, sections, entities and their
+    association rows) for a topic so a re-process rebuilds cleanly instead of
+    appending duplicates. Source data (documents, chunks, images) is preserved;
+    none of these artifacts live in Qdrant, so no vector cleanup is needed.
+    """
+    entity_ids = select(Entity.id).where(Entity.topic_id == topic_id)
+    subtopic_ids = select(SubTopic.id).where(SubTopic.topic_id == topic_id)
+
+    # Association tables have no ON DELETE CASCADE, so clear their rows first.
+    await db.execute(delete(chunk_entities).where(chunk_entities.c.entity_id.in_(entity_ids)))
+    await db.execute(delete(image_entities).where(image_entities.c.entity_id.in_(entity_ids)))
+    await db.execute(delete(chunk_subtopics).where(chunk_subtopics.c.subtopic_id.in_(subtopic_ids)))
+
+    # Entities reference subtopics and sections, so delete them before those.
+    await db.execute(delete(Entity).where(Entity.topic_id == topic_id))
+    await db.execute(delete(Section).where(Section.topic_id == topic_id))
+    await db.execute(delete(SubTopic).where(SubTopic.topic_id == topic_id))
+
+
 async def _run_process_job(job_id: str, session_factory=None) -> None:
     from classifier import assign_chunks_to_subtopics, discover_subtopics
 
@@ -436,6 +459,11 @@ async def _run_process_job(job_id: str, session_factory=None) -> None:
                 job.completed_at = datetime.now(timezone.utc)
                 await db.commit()
                 return
+
+            # Re-processing rebuilds from scratch: drop prior subtopics,
+            # sections and entities so they aren't duplicated.
+            await _clear_topic_derived_data(job.topic_id, db)
+            await db.commit()
 
             subtopics = await discover_subtopics(chunks, job.topic_id, db)
             await db.commit()
@@ -468,12 +496,39 @@ async def process_topic(topic_id: str, db: DB, background_tasks: BackgroundTasks
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
+    existing = await db.execute(
+        select(Job).where(
+            Job.topic_id == topic_id,
+            Job.type == "process",
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+        )
+    )
+    in_flight = existing.scalar_one_or_none()
+    if in_flight is not None:
+        return in_flight
     job = Job(topic_id=topic_id, type="process")
     db.add(job)
     await db.commit()
     await db.refresh(job)
     background_tasks.add_task(_run_process_job, job.id)
     return job
+
+
+@app.get("/topics/{topic_id}/active-job", response_model=Optional[JobOut])
+async def get_active_job(topic_id: str, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    result = await db.execute(
+        select(Job)
+        .where(
+            Job.topic_id == topic_id,
+            Job.type == "process",
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+        )
+        .order_by(Job.created_at.desc())
+    )
+    return result.scalars().first()
 
 
 @app.get("/jobs/{job_id}", response_model=JobOut)
