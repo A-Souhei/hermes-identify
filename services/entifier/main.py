@@ -1020,17 +1020,69 @@ def _subtract_intervals(targets: list, taken: list) -> list:
     return result
 
 
+_TABLE_RE = _re.compile(r'<table\b[^>]*>.*?</table>', _re.DOTALL | _re.IGNORECASE)
 _FOOTNOTE_REF_RE = _re.compile(r'\[\^[^\]]+\]')
 _FOOTNOTE_DEF_RE = _re.compile(r'^\[\^[^\]]+\]:.*$', _re.MULTILINE)
 _HTML_TAG_RE = _re.compile(r'<[^>]+>')
+# Merge bold runs split by a removed inline tag, e.g. "**A**™**.**" -> "**A™.**"
+_BOLD_MERGE_RE = _re.compile(r'\*\*([^*]+?)\*\*([^\s*]{1,3})\*\*([^*]+?)\*\*')
+_QUAD_STAR_RE = _re.compile(r'\*{4,}')
+_DOUBLE_DOT_RE = _re.compile(r'(?<!\.)\.\.(?!\.)')
 _MULTI_NEWLINE_RE = _re.compile(r'\n{3,}')
+# A line made up entirely of markdown-structural punctuation (e.g. ">***", "***", "---").
+_ARTIFACT_LINE_RE = _re.compile(r'[>*_~.\-`|\s]+')
+# A heading line: ATX ("## Title") or a fully bold-italic pseudo-heading ("***Title***").
+_HEADING_LINE_RE = _re.compile(r'#{1,6}\s+\S.*|\*{3}.+\*{3}')
+
+
+def _snap_to_paragraph(full_text: str, start: int, end: int) -> tuple:
+    """Expand an offset range outward to the nearest blank-line boundaries so
+    excerpts begin and end at paragraph breaks instead of mid-sentence."""
+    para_start = full_text.rfind("\n\n", 0, start)
+    start = 0 if para_start == -1 else para_start + 2
+    para_end = full_text.find("\n\n", end)
+    end = len(full_text) if para_end == -1 else para_end
+    return start, end
+
+
+def _trim_partial_tables(start: int, end: int, tables: list) -> tuple:
+    """If the span begins or ends inside an HTML table, pull the boundary out of
+    it so excerpts never include orphaned table-cell fragments (the wrapping
+    <table> tags lie outside the slice and so escape _clean_markdown)."""
+    for ts, te in tables:
+        if ts <= start < te:
+            start = te
+        if ts < end <= te:
+            end = ts
+    return start, end
 
 
 def _clean_markdown(text: str) -> str:
-    """Strip footnotes and HTML tags; collapse excessive blank lines."""
+    """Reduce raw source markdown to clean flowing prose: drop layout tables and
+    footnotes, strip inline HTML, repair bold runs broken by tag removal, and
+    discard punctuation-only artifact lines."""
+    text = _TABLE_RE.sub('\n\n', text)            # drop layout/callout tables wholesale
     text = _FOOTNOTE_DEF_RE.sub('', text)
     text = _FOOTNOTE_REF_RE.sub('', text)
-    text = _HTML_TAG_RE.sub('', text)
+    text = _HTML_TAG_RE.sub('', text)             # keep inner text of remaining inline tags
+    for _ in range(2):
+        text = _BOLD_MERGE_RE.sub(r'**\1\2\3**', text)
+    text = _QUAD_STAR_RE.sub('', text)            # collapse "****" emphasis noise
+    text = _DOUBLE_DOT_RE.sub('.', text)
+    # Drop lines that are nothing but markdown-structural punctuation (">***", "***").
+    lines = [
+        ln for ln in text.split('\n')
+        if not ln.strip() or not _ARTIFACT_LINE_RE.fullmatch(ln.strip())
+    ]
+    # Drop trailing headings with no body text after them (dangling section titles
+    # left behind when their table/body was removed).
+    while lines:
+        last = lines[-1].strip()
+        if not last or _HEADING_LINE_RE.fullmatch(last):
+            lines.pop()
+        else:
+            break
+    text = '\n'.join(lines)
     text = _MULTI_NEWLINE_RE.sub('\n\n', text)
     return text.strip()
 
@@ -1127,11 +1179,19 @@ async def render_dossier(dossier_id: str, db: DB):
             if not offsets:
                 continue
 
-            block_intervals = list(offsets.values())
-            block_merged = _merge_intervals(block_intervals)
+            # Coherent excerpt: one contiguous span from the block's earliest to
+            # latest chunk, snapped to paragraph boundaries and pulled clear of any
+            # partial table, instead of stitching scattered fragments.
+            iv = list(offsets.values())
+            tables = [(m.start(), m.end()) for m in _TABLE_RE.finditer(full_text)]
+            s0, e0 = _snap_to_paragraph(full_text, min(s for s, _ in iv), max(e for _, e in iv))
+            s0, e0 = _trim_partial_tables(s0, e0, tables)
+            if s0 >= e0:
+                continue
+            span = (s0, e0)
 
             already_emitted = emitted.get(doc_id, [])
-            new_intervals = _subtract_intervals(block_merged, already_emitted)
+            new_intervals = _subtract_intervals([span], already_emitted)
 
             for s, e in sorted(new_intervals, key=lambda x: x[0]):
                 cleaned = _clean_markdown(full_text[s:e])

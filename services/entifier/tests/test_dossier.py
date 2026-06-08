@@ -240,6 +240,28 @@ class TestCleanMarkdown:
         assert "**bold**" in result
         assert "- item" in result
 
+    def test_drops_trailing_dangling_heading(self):
+        from main import _clean_markdown
+        result = _clean_markdown("Body paragraph.\n\n***8.3.2 Dispositif de suivi***")
+        assert "Dispositif" not in result
+        assert result.rstrip().endswith("Body paragraph.")
+
+    def test_keeps_heading_with_body_after(self):
+        from main import _clean_markdown
+        result = _clean_markdown("### **8.2 Title**\n\nReal body text.")
+        assert "8.2 Title" in result
+        assert "Real body text." in result
+
+    def test_merges_bold_split_by_removed_tag(self):
+        from main import _clean_markdown
+        # "**Sah-AnAI**<span>™</span>**.**" -> after tag strip -> "**Sah-AnAI**™**.**"
+        result = _clean_markdown("**Sah-AnAI**™**.**")
+        assert "**Sah-AnAI™.**" in result
+
+    def test_collapses_quad_stars(self):
+        from main import _clean_markdown
+        assert "****" not in _clean_markdown("### **8****.2 Impact**")
+
 
 class TestMergeIntervals:
     def test_empty(self):
