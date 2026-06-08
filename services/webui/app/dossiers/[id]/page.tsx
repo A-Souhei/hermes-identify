@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+// SECURITY: render markdown WITHOUT rehype-raw — block content is reconstructed
+// from arbitrary source documents, so enabling raw HTML would be a stored-XSS vector.
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api, DossierBlockResolved, DossierDetail, DossierRenderBlock, TopicIndex } from '@/lib/api'
@@ -239,10 +241,12 @@ function DossierPreview({ dossierId }: { dossierId: string }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    let cancelled = false
     api.dossiers.render(dossierId)
-      .then(setBlocks)
-      .catch(() => setBlocks([]))
-      .finally(() => setLoading(false))
+      .then((b) => { if (!cancelled) setBlocks(b) })
+      .catch(() => { if (!cancelled) setBlocks([]) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [dossierId])
 
   if (loading) {

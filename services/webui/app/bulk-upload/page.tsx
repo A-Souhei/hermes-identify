@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, SmartIngestResult } from '@/lib/api'
 
 type FileStatus = 'queued' | 'classifying' | 'done' | 'error'
@@ -51,11 +51,14 @@ const POLL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 async function pollJobUntilDone(
   jobId: string,
   onUpdate: (status: TopicProcessStatus, error: string | null) => void,
+  isCancelled: () => boolean,
 ): Promise<void> {
   const deadline = Date.now() + POLL_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+    if (isCancelled()) return
     const job = await api.jobs.get(jobId)
+    if (isCancelled()) return
     if (job.status === 'completed') {
       onUpdate('completed', null)
       return
@@ -80,6 +83,8 @@ export default function BulkUploadPage() {
   const inputRef = useRef<HTMLInputElement>(null)
   const dragCounter = useRef(0)
   const [isDragging, setIsDragging] = useState(false)
+  const unmounted = useRef(false)
+  useEffect(() => () => { unmounted.current = true }, [])
 
   function addFiles(files: File[]) {
     if (running) return
@@ -175,21 +180,28 @@ export default function BulkUploadPage() {
         let jobId: string
         try {
           const job = await api.topics.process(topicId)
+          if (unmounted.current) return
           jobId = job.id
           setTopicStatus((prev) => ({ ...prev, [topicId]: { status: 'running', error: null } }))
         } catch (err) {
+          if (unmounted.current) return
           const message = err instanceof Error ? err.message : 'Failed to start job'
           setTopicStatus((prev) => ({ ...prev, [topicId]: { status: 'failed', error: message } }))
           return
         }
 
-        await pollJobUntilDone(jobId, (status, error) => {
-          setTopicStatus((prev) => ({ ...prev, [topicId]: { status, error } }))
-        })
+        await pollJobUntilDone(
+          jobId,
+          (status, error) => {
+            if (unmounted.current) return
+            setTopicStatus((prev) => ({ ...prev, [topicId]: { status, error } }))
+          },
+          () => unmounted.current,
+        )
       })
     )
 
-    setProcessing(false)
+    if (!unmounted.current) setProcessing(false)
   }
 
   return (

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api, Topic } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
 
@@ -78,6 +78,7 @@ export default function TopicsPage() {
   const [modalError, setModalError] = useState<string | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [processing, setProcessing] = useState<Record<string, boolean>>({})
+  const prevProcessing = useRef<Record<string, boolean>>({})
 
   const addToast = (message: string, type: Toast['type']) => {
     const id = Date.now()
@@ -121,12 +122,15 @@ export default function TopicsPage() {
       if (cancelled) return
       const next: Record<string, boolean> = {}
       for (const { id, active } of results) next[id] = active
-      setProcessing((prev) => {
-        // detect any topic that just finished; refresh topic list so entity counts update
-        const finished = Object.keys(prev).some((id) => prev[id] && !next[id])
-        if (finished) loadTopics()
-        return next
-      })
+      // Detect any topic that just finished, then refresh the list — done outside
+      // the state updater so it doesn't re-trigger this effect or run a side
+      // effect during render.
+      const finished = Object.keys(prevProcessing.current).some(
+        (id) => prevProcessing.current[id] && !next[id]
+      )
+      prevProcessing.current = next
+      setProcessing(next)
+      if (finished) loadTopics()
     }
 
     poll()

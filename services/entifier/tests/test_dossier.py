@@ -252,6 +252,12 @@ class TestCleanMarkdown:
         assert "8.2 Title" in result
         assert "Real body text." in result
 
+    def test_keeps_trailing_emphasised_sentence(self):
+        from main import _clean_markdown
+        # A real sentence wrapped in bold-italic is NOT a dangling heading.
+        result = _clean_markdown("Body.\n\n***Note: verify the figures before publication.***")
+        assert "verify the figures" in result
+
     def test_merges_bold_split_by_removed_tag(self):
         from main import _clean_markdown
         # "**Sah-AnAI**<span>™</span>**.**" -> after tag strip -> "**Sah-AnAI**™**.**"

@@ -1,7 +1,10 @@
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
+
+logger = logging.getLogger("entifier")
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from sqlalchemy import delete, select
@@ -963,7 +966,8 @@ async def _document_full_text(doc: Document, cache: dict) -> str:
         else:
             from ingestor import parse_md
             text = parse_md(content)
-    except Exception:
+    except Exception as exc:
+        logger.warning("dossier render: could not load/parse document %s: %s", doc.id, exc)
         text = ""
     cache[doc.id] = text
     return text
@@ -1031,13 +1035,31 @@ _DOUBLE_DOT_RE = _re.compile(r'(?<!\.)\.\.(?!\.)')
 _MULTI_NEWLINE_RE = _re.compile(r'\n{3,}')
 # A line made up entirely of markdown-structural punctuation (e.g. ">***", "***", "---").
 _ARTIFACT_LINE_RE = _re.compile(r'[>*_~.\-`|\s]+')
-# A heading line: ATX ("## Title") or a fully bold-italic pseudo-heading ("***Title***").
-_HEADING_LINE_RE = _re.compile(r'#{1,6}\s+\S.*|\*{3}.+\*{3}')
+_ATX_HEADING_RE = _re.compile(r'#{1,6}\s+\S.*')
+_PSEUDO_HEADING_RE = _re.compile(r'\*{3}(.+?)\*{3}')
+
+
+def _is_dangling_heading(line: str) -> bool:
+    """A trailing line that's a heading with no body after it: an ATX heading, or
+    a short fully bold-italic pseudo-heading that isn't a real sentence (so we
+    don't drop legitimate emphasised closing lines like '***Note: do X.***')."""
+    s = line.strip()
+    if _ATX_HEADING_RE.fullmatch(s):
+        return True
+    m = _PSEUDO_HEADING_RE.fullmatch(s)
+    if m:
+        inner = m.group(1).strip()
+        return len(inner) <= 80 and inner[-1:] not in ".!?"
+    return False
 
 
 def _snap_to_paragraph(full_text: str, start: int, end: int) -> tuple:
     """Expand an offset range outward to the nearest blank-line boundaries so
-    excerpts begin and end at paragraph breaks instead of mid-sentence."""
+    excerpts begin and end at paragraph breaks instead of mid-sentence. Documents
+    with no blank-line breaks are left untouched (otherwise a single chunk would
+    swallow the whole document)."""
+    if "\n\n" not in full_text:
+        return start, end
     para_start = full_text.rfind("\n\n", 0, start)
     start = 0 if para_start == -1 else para_start + 2
     para_end = full_text.find("\n\n", end)
@@ -1048,13 +1070,18 @@ def _snap_to_paragraph(full_text: str, start: int, end: int) -> tuple:
 def _trim_partial_tables(start: int, end: int, tables: list) -> tuple:
     """If the span begins or ends inside an HTML table, pull the boundary out of
     it so excerpts never include orphaned table-cell fragments (the wrapping
-    <table> tags lie outside the slice and so escape _clean_markdown)."""
+    <table> tags lie outside the slice and so escape _clean_markdown). If trimming
+    would invert the span (the span is fully inside one table), leave it unchanged
+    and let _clean_markdown drop the wrapped table instead of dropping everything."""
+    new_start, new_end = start, end
     for ts, te in tables:
-        if ts <= start < te:
-            start = te
-        if ts < end <= te:
-            end = ts
-    return start, end
+        if ts <= new_start < te:
+            new_start = te
+        if ts < new_end <= te:
+            new_end = ts
+    if new_start >= new_end:
+        return start, end
+    return new_start, new_end
 
 
 def _clean_markdown(text: str) -> str:
@@ -1078,7 +1105,7 @@ def _clean_markdown(text: str) -> str:
     # left behind when their table/body was removed).
     while lines:
         last = lines[-1].strip()
-        if not last or _HEADING_LINE_RE.fullmatch(last):
+        if not last or _is_dangling_heading(last):
             lines.pop()
         else:
             break
