@@ -474,6 +474,10 @@ class DossierBlockPatch(BaseModel):
     order_index: int = Field(..., ge=0)
 
 
+class DossierBlocksReorder(BaseModel):
+    block_ids: list[str]
+
+
 class DossierRenderBlock(BaseModel):
     block_id: str
     block_type: str

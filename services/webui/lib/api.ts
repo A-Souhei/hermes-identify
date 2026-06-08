@@ -262,6 +262,11 @@ export const api = {
         `/dossiers/${encodeURIComponent(id)}/blocks/${encodeURIComponent(blockId)}`,
         { method: 'PATCH', body: JSON.stringify({ order_index }) }
       ),
+    reorderBlocks: (id: string, blockIds: string[]) =>
+      request<void>(`/dossiers/${encodeURIComponent(id)}/blocks/reorder`, {
+        method: 'PATCH',
+        body: JSON.stringify({ block_ids: blockIds }),
+      }),
     render: (id: string) => request<DossierRenderBlock[]>(`/dossiers/${encodeURIComponent(id)}/render`),
   },
 }

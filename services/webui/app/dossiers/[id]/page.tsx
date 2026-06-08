@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { api, DossierBlockResolved, DossierDetail, DossierRenderBlock, TopicIndex } from '@/lib/api'
 
 const BLOCK_BADGE: Record<string, string> = {
@@ -12,21 +14,76 @@ const BLOCK_BADGE: Record<string, string> = {
   image: 'bg-rose-500/20 text-rose-300',
 }
 
+const HEADING_LEVEL: Record<string, number> = { subtopic: 2, section: 3 }
+
+function getHeadingLevel(block: DossierBlockResolved): number | null {
+  return HEADING_LEVEL[block.block_type] ?? null
+}
+
+function getSectionEnd(blocks: DossierBlockResolved[], fromIndex: number, level: number): number {
+  let i = fromIndex + 1
+  while (i < blocks.length) {
+    const lvl = getHeadingLevel(blocks[i])
+    if (lvl !== null && lvl <= level) break
+    i++
+  }
+  return i
+}
+
+function computeSectionMove(
+  blocks: DossierBlockResolved[],
+  headingIndex: number,
+  direction: -1 | 1
+): string[] | null {
+  const level = getHeadingLevel(blocks[headingIndex])
+  if (level === null) return null
+
+  const sectionEnd = getSectionEnd(blocks, headingIndex, level)
+  const current = blocks.slice(headingIndex, sectionEnd)
+
+  if (direction === -1) {
+    let prevIdx = headingIndex - 1
+    while (prevIdx >= 0) {
+      const lvl = getHeadingLevel(blocks[prevIdx])
+      if (lvl !== null) {
+        if (lvl === level) break
+        if (lvl < level) return null
+      }
+      prevIdx--
+    }
+    if (prevIdx < 0) return null
+    const prev = blocks.slice(prevIdx, headingIndex)
+    const before = blocks.slice(0, prevIdx)
+    const after = blocks.slice(sectionEnd)
+    return [...before, ...current, ...prev, ...after].map(b => b.id)
+  } else {
+    if (sectionEnd >= blocks.length) return null
+    const nextLevel = getHeadingLevel(blocks[sectionEnd])
+    if (nextLevel === null || nextLevel !== level) return null
+    const nextEnd = getSectionEnd(blocks, sectionEnd, level)
+    const next = blocks.slice(sectionEnd, nextEnd)
+    const before = blocks.slice(0, headingIndex)
+    const after = blocks.slice(nextEnd)
+    return [...before, ...next, ...current, ...after].map(b => b.id)
+  }
+}
+
 function BlockCard({
   block,
-  index,
-  total,
+  canMoveUp,
+  canMoveDown,
   onMoveUp,
   onMoveDown,
   onRemove,
 }: {
   block: DossierBlockResolved
-  index: number
-  total: number
+  canMoveUp: boolean
+  canMoveDown: boolean
   onMoveUp: () => void
   onMoveDown: () => void
   onRemove: () => void
 }) {
+  const isHeading = block.block_type === 'subtopic' || block.block_type === 'section'
   return (
     <div className="surface border border-ink-700/60 rounded-xl px-4 py-3 flex items-start gap-3">
       <div className="flex-1 min-w-0">
@@ -47,20 +104,20 @@ function BlockCard({
       </div>
       <div className="flex flex-col gap-1 shrink-0">
         <button
-          disabled={index === 0}
+          disabled={!canMoveUp}
           onClick={onMoveUp}
           className="p-1 rounded text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-          title="Move up"
+          title={isHeading ? 'Move section up' : 'Move up'}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="18 15 12 9 6 15" />
           </svg>
         </button>
         <button
-          disabled={index === total - 1}
+          disabled={!canMoveDown}
           onClick={onMoveDown}
           className="p-1 rounded text-ink-400 hover:text-ink-100 hover:bg-ink-800/60 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-          title="Move down"
+          title={isHeading ? 'Move section down' : 'Move down'}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="6 9 12 15 18 9" />
@@ -196,28 +253,34 @@ function DossierPreview({ dossierId }: { dossierId: string }) {
   }
 
   return (
-    <article className="max-w-3xl mx-auto">
+    <article className="max-w-3xl mx-auto dossier-doc">
       {blocks.map((block) => {
         if (block.block_type === 'subtopic') {
           return (
-            <h2 key={block.block_id} className="text-2xl font-bold text-ink-50 border-b border-ink-800 pb-3 mt-12 mb-6 first:mt-0">
-              {block.label}
-            </h2>
+            <div key={block.block_id}>
+              <h2 className="first:mt-0">{block.label}</h2>
+              {block.paragraphs.map((p, i) => (
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
+              ))}
+            </div>
           )
         }
         if (block.block_type === 'section') {
           return (
-            <h3 key={block.block_id} className="text-lg font-semibold text-ink-200 mt-8 mb-4">
-              {block.label}
-            </h3>
+            <div key={block.block_id}>
+              <h3>{block.label}</h3>
+              {block.paragraphs.map((p, i) => (
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
+              ))}
+            </div>
           )
         }
         if (block.block_type === 'entity') {
           if (block.paragraphs.length === 0) return null
           return (
-            <div key={block.block_id} className="mb-6 space-y-3">
+            <div key={block.block_id}>
               {block.paragraphs.map((p, i) => (
-                <p key={i} className="text-ink-300 text-sm leading-relaxed">{p}</p>
+                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>{p}</ReactMarkdown>
               ))}
             </div>
           )
@@ -317,27 +380,40 @@ export default function DossierDetailPage() {
 
   async function moveBlock(index: number, direction: -1 | 1) {
     if (!dossier) return
-    const blocks = [...dossier.blocks]
-    const targetIndex = index + direction
-    if (targetIndex < 0 || targetIndex >= blocks.length) return
+    const blocks = dossier.blocks
+    const block = blocks[index]
+    const isHeading = block.block_type === 'subtopic' || block.block_type === 'section'
 
-    const current = blocks[index]
-    const neighbor = blocks[targetIndex]
-
-    try {
-      const [updatedCurrent, updatedNeighbor] = await Promise.all([
-        api.dossiers.reorderBlock(id, current.id, neighbor.order_index),
-        api.dossiers.reorderBlock(id, neighbor.id, current.order_index),
-      ])
-      const newBlocks = blocks.map((b) => {
-        if (b.id === current.id) return updatedCurrent
-        if (b.id === neighbor.id) return updatedNeighbor
-        return b
-      })
-      newBlocks.sort((a, b) => a.order_index - b.order_index)
-      setDossier((prev) => prev ? { ...prev, blocks: newBlocks } : prev)
-    } catch {
-      // silent
+    if (isHeading) {
+      const newIds = computeSectionMove(blocks, index, direction)
+      if (!newIds) return
+      try {
+        await api.dossiers.reorderBlocks(id, newIds)
+        const reordered = newIds.map(bid => blocks.find(b => b.id === bid)!)
+        setDossier(prev => prev ? { ...prev, blocks: reordered } : prev)
+      } catch {
+        // silent
+      }
+    } else {
+      const targetIndex = index + direction
+      if (targetIndex < 0 || targetIndex >= blocks.length) return
+      const current = blocks[index]
+      const neighbor = blocks[targetIndex]
+      try {
+        const [updatedCurrent, updatedNeighbor] = await Promise.all([
+          api.dossiers.reorderBlock(id, current.id, neighbor.order_index),
+          api.dossiers.reorderBlock(id, neighbor.id, current.order_index),
+        ])
+        const newBlocks = blocks.map((b) => {
+          if (b.id === current.id) return updatedCurrent
+          if (b.id === neighbor.id) return updatedNeighbor
+          return b
+        })
+        newBlocks.sort((a, b) => a.order_index - b.order_index)
+        setDossier(prev => prev ? { ...prev, blocks: newBlocks } : prev)
+      } catch {
+        // silent
+      }
     }
   }
 
@@ -433,17 +509,26 @@ export default function DossierDetailPage() {
                 <p className="text-ink-500 text-sm">No blocks yet — add content from the left panel.</p>
               </div>
             )}
-            {dossier.blocks.map((block, i) => (
-              <BlockCard
-                key={block.id}
-                block={block}
-                index={i}
-                total={dossier.blocks.length}
-                onMoveUp={() => moveBlock(i, -1)}
-                onMoveDown={() => moveBlock(i, 1)}
-                onRemove={() => removeBlock(block.id)}
-              />
-            ))}
+            {dossier.blocks.map((block, i) => {
+              const isHeading = block.block_type === 'subtopic' || block.block_type === 'section'
+              const canUp = isHeading
+                ? computeSectionMove(dossier.blocks, i, -1) !== null
+                : i > 0
+              const canDown = isHeading
+                ? computeSectionMove(dossier.blocks, i, 1) !== null
+                : i < dossier.blocks.length - 1
+              return (
+                <BlockCard
+                  key={block.id}
+                  block={block}
+                  canMoveUp={canUp}
+                  canMoveDown={canDown}
+                  onMoveUp={() => moveBlock(i, -1)}
+                  onMoveDown={() => moveBlock(i, 1)}
+                  onRemove={() => removeBlock(block.id)}
+                />
+              )
+            })}
           </div>
         </div>
       </div>

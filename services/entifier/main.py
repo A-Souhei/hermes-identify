@@ -26,6 +26,7 @@ from models import (
     DossierBlockCreate,
     DossierBlockPatch,
     DossierBlockResolved,
+    DossierBlocksReorder,
     DossierCreate,
     DossierDetail,
     DossierOut,
@@ -933,6 +934,107 @@ async def get_dossier(dossier_id: str, db: DB):
     )
 
 
+# ── Dossier render helpers ────────────────────────────────────────────────────
+
+import re as _re
+
+
+async def _document_full_text(doc: Document, cache: dict) -> str:
+    """Download and parse a document's raw bytes into plain text, cached by doc.id."""
+    if doc.id in cache:
+        return cache[doc.id]
+    try:
+        if not doc.minio_key:
+            raise ValueError("no minio_key")
+        content: bytes = await storage.download_file(doc.minio_key)
+        suffix = Path(doc.filename or "").suffix.lower() if doc.filename else ""
+        if suffix == ".pdf":
+            from ingestor import parse_pdf
+            text, _ = await parse_pdf(content)
+        elif suffix == ".csv":
+            from ingestor import parse_csv
+            text = parse_csv(content)
+        elif suffix == ".json":
+            from ingestor import parse_json
+            text = parse_json(content)
+        elif suffix in (".yaml", ".yml"):
+            from ingestor import parse_yaml
+            text = parse_yaml(content)
+        else:
+            from ingestor import parse_md
+            text = parse_md(content)
+    except Exception:
+        text = ""
+    cache[doc.id] = text
+    return text
+
+
+def _chunk_offsets(full_text: str, chunks_ordered: list) -> dict:
+    """Map each chunk id to its (start, end) byte offsets in full_text."""
+    offsets: dict = {}
+    cursor = 0
+    for chunk in sorted(chunks_ordered, key=lambda c: c.chunk_index):
+        pos = full_text.find(chunk.content, cursor)
+        if pos == -1:
+            pos = full_text.find(chunk.content)
+        if pos == -1:
+            continue
+        offsets[chunk.id] = (pos, pos + len(chunk.content))
+        cursor = pos + 1
+    return offsets
+
+
+def _merge_intervals(intervals: list) -> list:
+    """Merge overlapping/adjacent intervals into sorted non-overlapping list."""
+    if not intervals:
+        return []
+    sorted_iv = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_iv[0]]
+    for s, e in sorted_iv[1:]:
+        if s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _subtract_intervals(targets: list, taken: list) -> list:
+    """Return the regions in targets that don't overlap with taken."""
+    if not taken:
+        return targets
+    result = []
+    for ts, te in targets:
+        remaining = [(ts, te)]
+        for rs, re_ in taken:
+            new_remaining = []
+            for s, e in remaining:
+                if re_ <= s or rs >= e:
+                    new_remaining.append((s, e))
+                else:
+                    if s < rs:
+                        new_remaining.append((s, rs))
+                    if re_ < e:
+                        new_remaining.append((re_, e))
+            remaining = new_remaining
+        result.extend(remaining)
+    return result
+
+
+_FOOTNOTE_REF_RE = _re.compile(r'\[\^[^\]]+\]')
+_FOOTNOTE_DEF_RE = _re.compile(r'^\[\^[^\]]+\]:.*$', _re.MULTILINE)
+_HTML_TAG_RE = _re.compile(r'<[^>]+>')
+_MULTI_NEWLINE_RE = _re.compile(r'\n{3,}')
+
+
+def _clean_markdown(text: str) -> str:
+    """Strip footnotes and HTML tags; collapse excessive blank lines."""
+    text = _FOOTNOTE_DEF_RE.sub('', text)
+    text = _FOOTNOTE_REF_RE.sub('', text)
+    text = _HTML_TAG_RE.sub('', text)
+    text = _MULTI_NEWLINE_RE.sub('\n\n', text)
+    return text.strip()
+
+
 @app.get("/dossiers/{dossier_id}/render", response_model=list[DossierRenderBlock])
 async def render_dossier(dossier_id: str, db: DB):
     result = await db.execute(
@@ -942,24 +1044,49 @@ async def render_dossier(dossier_id: str, db: DB):
     if not dossier:
         raise HTTPException(status_code=404, detail="dossier not found")
 
+    text_cache: dict = {}
+    # emitted[doc_id] = merged list of (start, end) intervals already output
+    emitted: dict = {}
+
     rendered: list[DossierRenderBlock] = []
     for block in sorted(dossier.blocks, key=lambda b: b.order_index):
         bt = block.block_type
         ref = block.ref_id
 
-        if bt == "subtopic":
-            obj = await db.get(SubTopic, ref)
+        if bt == "image":
+            obj = await db.get(Image, ref)
             rendered.append(DossierRenderBlock(
                 block_id=block.id, block_type=bt,
-                label=obj.name if obj else "(deleted)",
+                label=obj.filename if obj else "(deleted)",
+                paragraphs=[_clean_markdown(obj.description)] if obj and obj.description else [],
+                image_id=ref if obj else None,
             ))
+            continue
+
+        # Resolve chunks for this block
+        block_chunks: list = []
+        label = "(deleted)"
+
+        if bt == "subtopic":
+            st_res = await db.execute(
+                select(SubTopic).where(SubTopic.id == ref).options(selectinload(SubTopic.chunks))
+            )
+            obj = st_res.scalar_one_or_none()
+            if obj:
+                label = obj.name
+                block_chunks = list(obj.chunks)
 
         elif bt == "section":
-            obj = await db.get(Section, ref)
-            rendered.append(DossierRenderBlock(
-                block_id=block.id, block_type=bt,
-                label=obj.name if obj else "(deleted)",
-            ))
+            sec_res = await db.execute(
+                select(Section).where(Section.id == ref).options(
+                    selectinload(Section.entities).selectinload(Entity.chunks)
+                )
+            )
+            obj = sec_res.scalar_one_or_none()
+            if obj:
+                label = obj.name
+                for ent in obj.entities:
+                    block_chunks.extend(ent.chunks)
 
         elif bt == "entity":
             ent_res = await db.execute(
@@ -967,24 +1094,62 @@ async def render_dossier(dossier_id: str, db: DB):
             )
             obj = ent_res.scalar_one_or_none()
             if obj:
-                chunks = sorted(obj.chunks, key=lambda c: c.chunk_index)
-                paragraphs = [c.content for c in chunks]
-            else:
-                paragraphs = []
-            rendered.append(DossierRenderBlock(
-                block_id=block.id, block_type=bt,
-                label=obj.name if obj else "(deleted)",
-                paragraphs=paragraphs,
-            ))
+                label = obj.name
+                block_chunks = list(obj.chunks)
 
-        elif bt == "image":
-            obj = await db.get(Image, ref)
-            rendered.append(DossierRenderBlock(
-                block_id=block.id, block_type=bt,
-                label=obj.filename if obj else "(deleted)",
-                paragraphs=[obj.description] if obj and obj.description else [],
-                image_id=ref if obj else None,
-            ))
+        # Group chunks by document
+        chunks_by_doc: dict = {}
+        for chunk in block_chunks:
+            chunks_by_doc.setdefault(chunk.document_id, []).append(chunk)
+
+        paragraphs: list[str] = []
+        seen_chunk_ids: set = set()  # for fallback dedup
+
+        for doc_id, doc_chunks in chunks_by_doc.items():
+            # Fetch the document to get created_at for ordering
+            doc = await db.get(Document, doc_id)
+            if doc is None:
+                continue
+
+            full_text = await _document_full_text(doc, text_cache)
+
+            if not full_text:
+                # Fallback: emit raw chunk content, deduped by chunk id
+                for chunk in sorted(doc_chunks, key=lambda c: c.chunk_index):
+                    if chunk.id not in seen_chunk_ids:
+                        seen_chunk_ids.add(chunk.id)
+                        cleaned = _clean_markdown(chunk.content)
+                        if cleaned:
+                            paragraphs.append(cleaned)
+                continue
+
+            offsets = _chunk_offsets(full_text, doc_chunks)
+            if not offsets:
+                continue
+
+            block_intervals = list(offsets.values())
+            block_merged = _merge_intervals(block_intervals)
+
+            already_emitted = emitted.get(doc_id, [])
+            new_intervals = _subtract_intervals(block_merged, already_emitted)
+
+            for s, e in sorted(new_intervals, key=lambda x: x[0]):
+                cleaned = _clean_markdown(full_text[s:e])
+                if cleaned:
+                    paragraphs.append(cleaned)
+
+            if new_intervals:
+                emitted[doc_id] = _merge_intervals(already_emitted + new_intervals)
+
+        # Always emit heading blocks (subtopic/section) even if empty
+        if bt == "entity" and not paragraphs:
+            continue
+
+        rendered.append(DossierRenderBlock(
+            block_id=block.id, block_type=bt,
+            label=label,
+            paragraphs=paragraphs,
+        ))
 
     return rendered
 
@@ -1048,6 +1213,27 @@ async def remove_dossier_block(dossier_id: str, block_id: str, db: DB):
     if dossier:
         dossier.updated_at = _now()
     await db.delete(block)
+    await db.commit()
+
+
+@app.patch("/dossiers/{dossier_id}/blocks/reorder", status_code=204)
+async def reorder_dossier_blocks(dossier_id: str, body: DossierBlocksReorder, db: DB):
+    dossier = await db.get(Dossier, dossier_id)
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+
+    result = await db.execute(
+        select(DossierBlock).where(DossierBlock.dossier_id == dossier_id)
+    )
+    existing = {b.id: b for b in result.scalars().all()}
+
+    if len(body.block_ids) != len(existing) or set(body.block_ids) != set(existing.keys()):
+        raise HTTPException(status_code=422, detail="block_ids must contain exactly all blocks in this dossier")
+
+    for i, bid in enumerate(body.block_ids):
+        existing[bid].order_index = i
+
+    dossier.updated_at = _now()
     await db.commit()
 
 

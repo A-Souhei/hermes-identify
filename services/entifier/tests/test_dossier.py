@@ -1,9 +1,10 @@
 """Tests for dossier CRUD and block management."""
 import pytest
+from unittest.mock import AsyncMock, patch
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import SubTopic
+from models import Chunk, Document, Dossier, DossierBlock, Entity, SourceType, SubTopic, Topic, chunk_entities
 
 
 class TestDossierCRUD:
@@ -198,3 +199,194 @@ class TestDossierBlocks:
         did2 = (await client.post("/dossiers", json={"name": "D2"})).json()["id"]
         r = await client.delete(f"/dossiers/{did2}/blocks/{block_id}")
         assert r.status_code == 404
+
+
+# ── Pure helper unit tests ────────────────────────────────────────────────────
+
+class TestCleanMarkdown:
+    def test_strips_inline_footnote_refs(self):
+        from main import _clean_markdown
+        assert "[^1]" not in _clean_markdown("Hello[^1] world[^abc].")
+
+    def test_drops_footnote_definition_lines(self):
+        from main import _clean_markdown
+        text = "Paragraph.\n\n[^1]: This is a footnote.\n\nMore text."
+        result = _clean_markdown(text)
+        assert "[^1]:" not in result
+        assert "More text." in result
+
+    def test_strips_html_tags_keeps_inner_text(self):
+        from main import _clean_markdown
+        assert _clean_markdown("<span class=\"mark\">™</span>") == "™"
+        assert _clean_markdown("<u>8.2.1</u>") == "8.2.1"
+
+    def test_html_table_tags_removed_leaving_cell_text(self):
+        from main import _clean_markdown
+        result = _clean_markdown("<td>data</td>")
+        assert "data" in result
+        assert "<td>" not in result
+
+    def test_collapses_excess_newlines(self):
+        from main import _clean_markdown
+        result = _clean_markdown("a\n\n\n\n\nb")
+        assert "\n\n\n" not in result
+        assert "a" in result and "b" in result
+
+    def test_preserves_markdown_syntax(self):
+        from main import _clean_markdown
+        text = "# Heading\n\n**bold** and *em*\n\n- item"
+        result = _clean_markdown(text)
+        assert "# Heading" in result
+        assert "**bold**" in result
+        assert "- item" in result
+
+
+class TestMergeIntervals:
+    def test_empty(self):
+        from main import _merge_intervals
+        assert _merge_intervals([]) == []
+
+    def test_single(self):
+        from main import _merge_intervals
+        assert _merge_intervals([(1, 5)]) == [(1, 5)]
+
+    def test_non_overlapping_sorted(self):
+        from main import _merge_intervals
+        assert _merge_intervals([(1, 3), (5, 8)]) == [(1, 3), (5, 8)]
+
+    def test_overlapping_merged(self):
+        from main import _merge_intervals
+        assert _merge_intervals([(1, 5), (3, 8)]) == [(1, 8)]
+
+    def test_adjacent_merged(self):
+        from main import _merge_intervals
+        assert _merge_intervals([(1, 5), (5, 8)]) == [(1, 8)]
+
+    def test_unsorted_fully_merged(self):
+        from main import _merge_intervals
+        # (1,5), (3,12), (10,20) all overlap into (1,20)
+        result = _merge_intervals([(10, 20), (1, 5), (3, 12)])
+        assert result == [(1, 20)]
+
+
+class TestSubtractIntervals:
+    def test_no_taken(self):
+        from main import _subtract_intervals
+        assert _subtract_intervals([(0, 10)], []) == [(0, 10)]
+
+    def test_fully_covered(self):
+        from main import _subtract_intervals
+        assert _subtract_intervals([(0, 10)], [(0, 10)]) == []
+
+    def test_left_remainder(self):
+        from main import _subtract_intervals
+        assert _subtract_intervals([(0, 10)], [(5, 10)]) == [(0, 5)]
+
+    def test_right_remainder(self):
+        from main import _subtract_intervals
+        assert _subtract_intervals([(0, 10)], [(0, 5)]) == [(5, 10)]
+
+    def test_middle_punched_out(self):
+        from main import _subtract_intervals
+        result = _subtract_intervals([(0, 10)], [(3, 7)])
+        assert result == [(0, 3), (7, 10)]
+
+    def test_non_overlapping_taken(self):
+        from main import _subtract_intervals
+        assert _subtract_intervals([(0, 5)], [(10, 20)]) == [(0, 5)]
+
+
+# ── Render integration test ───────────────────────────────────────────────────
+
+class TestRenderDossierDedup:
+    """Shared passage appears in the first block only; HTML/footnotes are cleaned."""
+
+    async def test_shared_chunk_deduplicated_and_cleaned(
+        self, client: AsyncClient, db_session: AsyncSession
+    ):
+        FULL_TEXT = (
+            "Introduction paragraph.\n\n"
+            "Shared passage with <b>bold HTML</b> and footnote[^1].\n\n"
+            "[^1]: The footnote definition.\n\n"
+            "Trailing paragraph."
+        )
+        shared_content = "Shared passage with <b>bold HTML</b> and footnote[^1]."
+        trailing_content = "Trailing paragraph."
+
+        assert shared_content in FULL_TEXT
+        assert trailing_content in FULL_TEXT
+
+        topic = Topic(id="t-rdd", name="T")
+        db_session.add(topic)
+        doc = Document(
+            id="doc-rdd", topic_id="t-rdd",
+            source_type=SourceType.FILE,
+            source_ref="test.md",
+            filename="test.md",
+            minio_key="docs/test.md",
+        )
+        db_session.add(doc)
+        await db_session.flush()
+
+        chunk_shared = Chunk(id="ck-shared", document_id="doc-rdd", topic_id="t-rdd",
+                             content=shared_content, chunk_index=0, token_count=10)
+        chunk_trail = Chunk(id="ck-trail", document_id="doc-rdd", topic_id="t-rdd",
+                            content=trailing_content, chunk_index=1, token_count=5)
+        db_session.add_all([chunk_shared, chunk_trail])
+        await db_session.flush()
+
+        ent_a = Entity(id="ent-a", topic_id="t-rdd", name="Entity A", ref_id="ENT-000001")
+        ent_b = Entity(id="ent-b", topic_id="t-rdd", name="Entity B", ref_id="ENT-000002")
+        db_session.add_all([ent_a, ent_b])
+        await db_session.flush()
+
+        # Both entities share chunk_shared; only ent_b also has chunk_trail
+        await db_session.execute(
+            chunk_entities.insert().values([
+                {"chunk_id": "ck-shared", "entity_id": "ent-a"},
+                {"chunk_id": "ck-shared", "entity_id": "ent-b"},
+                {"chunk_id": "ck-trail", "entity_id": "ent-b"},
+            ])
+        )
+
+        dossier = Dossier(id="dos-rdd", name="Test")
+        db_session.add(dossier)
+        await db_session.flush()
+
+        db_session.add_all([
+            DossierBlock(id="blk-a", dossier_id="dos-rdd", block_type="entity",
+                         ref_id="ent-a", order_index=0),
+            DossierBlock(id="blk-b", dossier_id="dos-rdd", block_type="entity",
+                         ref_id="ent-b", order_index=1),
+        ])
+        await db_session.commit()
+
+        with patch("storage.download_file", new_callable=AsyncMock,
+                   return_value=FULL_TEXT.encode()):
+            r = await client.get("/dossiers/dos-rdd/render")
+
+        assert r.status_code == 200
+        data = r.json()
+
+        block_a = next(b for b in data if b["block_id"] == "blk-a")
+        block_b = next(b for b in data if b["block_id"] == "blk-b")
+
+        combined_a = "\n".join(block_a["paragraphs"])
+        combined_b = "\n".join(block_b["paragraphs"])
+
+        # Shared passage only in first block
+        assert "Shared passage" in combined_a
+        assert "Shared passage" not in combined_b
+
+        # Trailing content only in second block
+        assert "Trailing paragraph" in combined_b
+        assert "Trailing paragraph" not in combined_a
+
+        # HTML stripped, inner text preserved
+        assert "<b>" not in combined_a
+        assert "bold HTML" in combined_a
+
+        # Footnote ref stripped
+        assert "[^1]" not in combined_a
+        # Footnote definition line dropped
+        assert "footnote definition" not in combined_a.lower()
