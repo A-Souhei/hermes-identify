@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { api, Document, Entity, Image, SubTopic, TopicIndex, Topic, SearchResponse } from '@/lib/api'
+import { api, BundleIngestResult, Document, Entity, Image, SubTopic, TopicIndex, Topic, SearchResponse } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
 import { Lightbox } from '@/components/Lightbox'
 
@@ -414,6 +414,12 @@ function IngestTab({
   const [imageRunning, setImageRunning] = useState(false)
   const imageRunningRef = useRef(false)
 
+  // Bundle upload
+  const [bundleStatus, setBundleStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle')
+  const [bundleResult, setBundleResult] = useState<BundleIngestResult | null>(null)
+  const [bundleError, setBundleError] = useState<string | null>(null)
+  const bundleInputRef = useRef<HTMLInputElement>(null)
+
   // Auto-process
   const [autoProcess, setAutoProcess] = useState(true)
   const autoProcessRef = useRef(true)
@@ -605,6 +611,35 @@ function IngestTab({
       if (item) URL.revokeObjectURL(item.previewUrl)
       return prev.filter(i => i.id !== id)
     })
+  }
+
+  // ── Bundle upload ────────────────────────────────────────────────────────
+
+  async function handleBundleFile(file: File) {
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      addToast(`${file.name} is not a .zip file`, 'error')
+      return
+    }
+    const MAX_BUNDLE = 100 * 1024 * 1024
+    if (file.size > MAX_BUNDLE) {
+      addToast(`${file.name} exceeds 100 MB limit`, 'error')
+      return
+    }
+    setBundleStatus('uploading')
+    setBundleResult(null)
+    setBundleError(null)
+    try {
+      const result = await api.topics.ingestBundle(topicId, file)
+      setBundleStatus('done')
+      setBundleResult(result)
+      onDocumentIngested()
+      broadcastRef.current?.postMessage({ type: 'topic-updated', topicId })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Bundle upload failed'
+      setBundleStatus('error')
+      setBundleError(msg)
+      addToast(msg, 'error')
+    }
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -954,6 +989,56 @@ function IngestTab({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Section 4 — Bundle upload */}
+      <div className="pt-8">
+        <p className="label-eyebrow mb-1">Upload Bundle (.zip)</p>
+        <p className="text-xs text-ink-500 mb-4">
+          ZIP containing a markdown file and its <code className="text-ink-400">images/</code> folder — images will render inline in the dossier preview.
+        </p>
+
+        <input
+          ref={bundleInputRef}
+          type="file"
+          accept=".zip"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) { handleBundleFile(f); e.target.value = '' }
+          }}
+        />
+        <button
+          onClick={() => bundleInputRef.current?.click()}
+          disabled={bundleStatus === 'uploading'}
+          className="btn-secondary text-sm"
+        >
+          {bundleStatus === 'uploading' ? (
+            <>
+              <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-9-9" />
+              </svg>
+              Uploading…
+            </>
+          ) : 'Choose .zip file'}
+        </button>
+
+        {bundleStatus === 'done' && bundleResult && (
+          <p className="mt-3 text-xs text-emerald-400">
+            Ingested <span className="font-medium">{bundleResult.document.filename}</span>
+            {bundleResult.asset_count > 0 && ` with ${bundleResult.asset_count} image asset${bundleResult.asset_count !== 1 ? 's' : ''}`}.
+            {' '}
+            <button
+              onClick={() => { setBundleStatus('idle'); setBundleResult(null) }}
+              className="underline hover:text-emerald-300"
+            >
+              Upload another
+            </button>
+          </p>
+        )}
+        {bundleStatus === 'error' && bundleError && (
+          <p className="mt-3 text-xs text-rose-400">{bundleError}</p>
+        )}
       </div>
     </div>
   )

@@ -139,6 +139,19 @@ export interface SmartIngestResult {
   filename: string
 }
 
+export interface DocumentAssetOut {
+  id: string
+  document_id: string
+  rel_path: string
+  content_type: string
+  created_at: string
+}
+
+export interface BundleIngestResult {
+  document: Document
+  asset_count: number
+}
+
 export interface DossierBlockResolved {
   id: string
   block_type: 'topic' | 'subtopic' | 'section' | 'entity' | 'image'
@@ -203,6 +216,12 @@ export const api = {
       if (context) fd.append('context', context)
       return upload<Image>(`/topics/${encodeURIComponent(id)}/ingest/image`, fd)
     },
+    ingestBundle: (id: string, file: File, context?: string) => {
+      const fd = new FormData()
+      fd.append('file', file)
+      if (context) fd.append('context', context)
+      return upload<BundleIngestResult>(`/topics/${encodeURIComponent(id)}/ingest/bundle`, fd)
+    },
     links: (id: string) => request<Topic[]>(`/topics/${encodeURIComponent(id)}/links`),
     addLink: (id: string, linkedTopicId: string) =>
       request<Topic>(`/topics/${encodeURIComponent(id)}/links`, {
@@ -232,6 +251,8 @@ export const api = {
   },
   images: {
     contentUrl: (id: string) => `/api/entifier/images/${encodeURIComponent(id)}/content`,
+    assetContentUrl: (documentId: string, assetId: string) =>
+      `/api/entifier/documents/${encodeURIComponent(documentId)}/assets/${encodeURIComponent(assetId)}/content`,
   },
   dossiers: {
     list: () => request<DossierOut[]>('/dossiers'),

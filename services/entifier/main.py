@@ -1,4 +1,8 @@
+import io
 import logging
+import posixpath
+import urllib.parse
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,11 +22,14 @@ import storage
 from db import SessionLocal, create_tables, get_session, run_migrations
 from models import (
     _now,
+    BundleIngestResult,
     Chunk,
     ChunkSummary,
     chunk_entities,
     chunk_subtopics,
     Document,
+    DocumentAsset,
+    DocumentAssetOut,
     DocumentOut,
     Dossier,
     DossierBlock,
@@ -190,6 +197,142 @@ async def ingest_file(topic_id: str, db: DB, file: UploadFile = File(...), conte
     content = await file.read()
     filename = file.filename or "unknown"
     return await _do_ingest_file(topic_id, filename, content, context, db)
+
+
+_ASSET_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+MAX_BUNDLE_SIZE = 100 * 1024 * 1024        # 100 MB compressed
+MAX_BUNDLE_UNCOMPRESSED = 200 * 1024 * 1024  # 200 MB uncompressed
+MAX_BUNDLE_ENTRIES = 1000
+
+
+@app.post("/topics/{topic_id}/ingest/bundle", response_model=BundleIngestResult, status_code=201)
+async def ingest_bundle(
+    topic_id: str,
+    db: DB,
+    file: UploadFile = File(...),
+    context: Optional[str] = Form(None),
+):
+    """Ingest a ZIP bundle containing a markdown file and its referenced images."""
+    if context and len(context) > 1000:
+        raise HTTPException(status_code=422, detail="context must be 1000 characters or fewer")
+
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+
+    content = await file.read()
+    if len(content) > MAX_BUNDLE_SIZE:
+        raise HTTPException(status_code=413, detail="bundle too large (max 100 MB)")
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=422, detail="file is not a valid ZIP archive")
+
+    entries = zf.infolist()
+
+    # Zip-bomb / zip-slip guard
+    if len(entries) > MAX_BUNDLE_ENTRIES:
+        raise HTTPException(status_code=413, detail="too many entries in bundle (max 1000)")
+
+    total_uncompressed = sum(e.file_size for e in entries)
+    if total_uncompressed > MAX_BUNDLE_UNCOMPRESSED:
+        raise HTTPException(status_code=413, detail="bundle uncompressed content too large (max 200 MB)")
+
+    def _is_safe_entry(name: str) -> bool:
+        """Reject absolute paths, path traversal, Windows drive letters, backslashes."""
+        if not name or name.startswith('/'):
+            return False
+        if '\\' in name:
+            return False
+        # Drive letter e.g. C:
+        if len(name) >= 2 and name[1] == ':':
+            return False
+        norm = posixpath.normpath(name)
+        if norm.startswith('..') or '/../' in norm:
+            return False
+        return True
+
+    safe_entries = [e for e in entries if not e.is_dir() and _is_safe_entry(e.filename)]
+
+    # Find the shallowest markdown file
+    md_entry = None
+    for e in safe_entries:
+        suffix = Path(e.filename).suffix.lower()
+        if suffix in {".md", ".markdown"}:
+            depth = e.filename.count('/')
+            if md_entry is None or depth < md_entry.filename.count('/'):
+                md_entry = e
+
+    if md_entry is None:
+        raise HTTPException(status_code=422, detail="no markdown file in bundle")
+
+    md_bytes = zf.read(md_entry.filename)
+    md_basename = Path(md_entry.filename).name
+    doc = await _do_ingest_file(topic_id, md_basename, md_bytes, context, db)
+
+    # Parent directory of the markdown entry (posix, may be empty string)
+    md_parent = posixpath.dirname(md_entry.filename)
+
+    asset_count = 0
+    for e in safe_entries:
+        if e.filename == md_entry.filename:
+            continue
+        suffix = Path(e.filename).suffix.lower()
+        if suffix not in ALLOWED_IMAGE_EXTENSIONS:
+            continue
+
+        ct = _ASSET_CONTENT_TYPES.get(suffix, "image/png")
+        # Relative path from the markdown file's directory
+        if md_parent:
+            rel = posixpath.relpath(e.filename, md_parent)
+        else:
+            rel = e.filename
+
+        asset_bytes = zf.read(e.filename)
+        minio_key = f"{topic_id}/documents/{doc.id}/assets/{rel}"
+        await storage.upload_file(minio_key, asset_bytes, ct)
+
+        asset = DocumentAsset(
+            document_id=doc.id,
+            topic_id=topic_id,
+            rel_path=rel,
+            minio_key=minio_key,
+            content_type=ct,
+        )
+        db.add(asset)
+        asset_count += 1
+
+    await db.commit()
+    return BundleIngestResult(document=DocumentOut.model_validate(doc), asset_count=asset_count)
+
+
+@app.get("/documents/{document_id}/assets/{asset_id}/content")
+async def get_document_asset_content(document_id: str, asset_id: str, db: DB):
+    from fastapi.responses import Response
+
+    result = await db.execute(
+        select(DocumentAsset).where(
+            DocumentAsset.id == asset_id,
+            DocumentAsset.document_id == document_id,
+        )
+    )
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="asset not found")
+    asset_bytes = await storage.download_file(asset.minio_key)
+    return Response(
+        content=asset_bytes,
+        media_type=asset.content_type,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 MAX_SMART_INGEST_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -1116,6 +1259,52 @@ def _clean_markdown(text: str) -> str:
     return text.strip()
 
 
+_MD_IMAGE_RE = _re.compile(
+    r'!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)'
+)
+
+
+def _rewrite_asset_links(
+    md: str,
+    doc_id: str,
+    assets_by_doc: dict,
+) -> str:
+    """Rewrite markdown image links that reference local assets to their API URLs.
+
+    - Mapped assets → /documents/{doc_id}/assets/{asset.id}/content
+    - Unmapped local images → *alt* (italic caption placeholder, no broken img)
+    - External http(s):// URLs → left untouched
+    """
+    doc_assets = assets_by_doc.get(doc_id, {})
+
+    def _replace(m: "_re.Match") -> str:
+        alt = m.group(1)
+        src = m.group(2)
+
+        # Leave external URLs alone
+        if src.startswith("http://") or src.startswith("https://"):
+            return m.group(0)
+
+        # Normalize: URL-decode, strip leading ./
+        normalized = urllib.parse.unquote(src)
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = posixpath.normpath(normalized)
+
+        asset = doc_assets.get(normalized)
+        if asset is None:
+            # Fallback: try basename
+            asset = doc_assets.get(posixpath.basename(normalized))
+
+        if asset is not None:
+            return f"![{alt}](/documents/{doc_id}/assets/{asset.id}/content)"
+
+        # No asset found — render as italic caption so no broken image shows
+        return f"*{alt}*" if alt else ""
+
+    return _MD_IMAGE_RE.sub(_replace, md)
+
+
 @app.get("/dossiers/{dossier_id}/render", response_model=list[DossierRenderBlock])
 async def render_dossier(dossier_id: str, db: DB):
     result = await db.execute(
@@ -1128,6 +1317,24 @@ async def render_dossier(dossier_id: str, db: DB):
     text_cache: dict = {}
     # emitted[doc_id] = merged list of (start, end) intervals already output
     emitted: dict = {}
+
+    # assets_by_doc[doc_id] = {normalized_rel_path: asset, basename: asset}
+    # Loaded lazily on first reference to each doc_id.
+    assets_by_doc: dict = {}
+
+    async def _ensure_assets_loaded(doc_id: str) -> None:
+        if doc_id in assets_by_doc:
+            return
+        res = await db.execute(
+            select(DocumentAsset).where(DocumentAsset.document_id == doc_id)
+        )
+        assets = res.scalars().all()
+        lookup: dict = {}
+        for a in assets:
+            norm = posixpath.normpath(a.rel_path)
+            lookup[norm] = a
+            lookup[posixpath.basename(norm)] = a
+        assets_by_doc[doc_id] = lookup
 
     rendered: list[DossierRenderBlock] = []
     for block in sorted(dossier.blocks, key=lambda b: b.order_index):
@@ -1192,6 +1399,7 @@ async def render_dossier(dossier_id: str, db: DB):
             if doc is None:
                 continue
 
+            await _ensure_assets_loaded(doc_id)
             full_text = await _document_full_text(doc, text_cache)
 
             if not full_text:
@@ -1200,6 +1408,7 @@ async def render_dossier(dossier_id: str, db: DB):
                     if chunk.id not in seen_chunk_ids:
                         seen_chunk_ids.add(chunk.id)
                         cleaned = _clean_markdown(chunk.content)
+                        cleaned = _rewrite_asset_links(cleaned, doc_id, assets_by_doc)
                         if cleaned:
                             paragraphs.append(cleaned)
                 continue
@@ -1224,6 +1433,7 @@ async def render_dossier(dossier_id: str, db: DB):
 
             for s, e in sorted(new_intervals, key=lambda x: x[0]):
                 cleaned = _clean_markdown(full_text[s:e])
+                cleaned = _rewrite_asset_links(cleaned, doc_id, assets_by_doc)
                 if cleaned:
                     paragraphs.append(cleaned)
 
