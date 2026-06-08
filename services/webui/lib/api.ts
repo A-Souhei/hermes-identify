@@ -159,6 +159,14 @@ export interface DossierDetail extends DossierOut {
   blocks: DossierBlockResolved[]
 }
 
+export interface DossierRenderBlock {
+  block_id: string
+  block_type: string
+  label: string
+  paragraphs: string[]
+  image_id: string | null
+}
+
 export const api = {
   topics: {
     list: () => request<Topic[]>('/topics'),
@@ -175,6 +183,7 @@ export const api = {
       ),
     index: (id: string) => request<TopicIndex>(`/topics/${encodeURIComponent(id)}/index`),
     process: (id: string) => request<Job>(`/topics/${encodeURIComponent(id)}/process`, { method: 'POST' }),
+    activeJob: (id: string) => request<Job | null>(`/topics/${encodeURIComponent(id)}/active-job`),
     documents: (id: string) => request<Document[]>(`/topics/${encodeURIComponent(id)}/documents`),
     images: (id: string) => request<Image[]>(`/topics/${encodeURIComponent(id)}/images`),
     ingestFile: (id: string, file: File, context?: string) => {
@@ -253,5 +262,11 @@ export const api = {
         `/dossiers/${encodeURIComponent(id)}/blocks/${encodeURIComponent(blockId)}`,
         { method: 'PATCH', body: JSON.stringify({ order_index }) }
       ),
+    reorderBlocks: (id: string, blockIds: string[]) =>
+      request<void>(`/dossiers/${encodeURIComponent(id)}/blocks/reorder`, {
+        method: 'PATCH',
+        body: JSON.stringify({ block_ids: blockIds }),
+      }),
+    render: (id: string) => request<DossierRenderBlock[]>(`/dossiers/${encodeURIComponent(id)}/render`),
   },
 }

@@ -1,14 +1,20 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, SmartIngestResult } from '@/lib/api'
 
 type FileStatus = 'queued' | 'classifying' | 'done' | 'error'
+type TopicProcessStatus = 'queued' | 'running' | 'completed' | 'failed'
 
 interface FileEntry {
   file: File
   status: FileStatus
   result: SmartIngestResult | null
+  error: string | null
+}
+
+interface TopicProcessState {
+  status: TopicProcessStatus
   error: string | null
 }
 
@@ -32,6 +38,40 @@ const STATUS_BADGE: Record<FileStatus, string> = {
   error: 'bg-rose-500/20 text-rose-300',
 }
 
+const TOPIC_STATUS_BADGE: Record<TopicProcessStatus, string> = {
+  queued: 'bg-ink-700 text-ink-300',
+  running: 'bg-amber-400/20 text-amber-300 animate-pulse',
+  completed: 'bg-emerald-500/20 text-emerald-300',
+  failed: 'bg-rose-500/20 text-rose-300',
+}
+
+const POLL_INTERVAL_MS = 2000
+const POLL_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+
+async function pollJobUntilDone(
+  jobId: string,
+  onUpdate: (status: TopicProcessStatus, error: string | null) => void,
+  isCancelled: () => boolean,
+): Promise<void> {
+  const deadline = Date.now() + POLL_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+    if (isCancelled()) return
+    const job = await api.jobs.get(jobId)
+    if (isCancelled()) return
+    if (job.status === 'completed') {
+      onUpdate('completed', null)
+      return
+    }
+    if (job.status === 'failed') {
+      onUpdate('failed', job.error ?? 'Job failed')
+      return
+    }
+    onUpdate('running', null)
+  }
+  onUpdate('failed', 'Timed out after 5 minutes')
+}
+
 export default function BulkUploadPage() {
   const MAX_FILES = 20
 
@@ -39,9 +79,12 @@ export default function BulkUploadPage() {
   const [running, setRunning] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [invalidFiles, setInvalidFiles] = useState<string[]>([])
+  const [topicStatus, setTopicStatus] = useState<Record<string, TopicProcessState>>({})
   const inputRef = useRef<HTMLInputElement>(null)
   const dragCounter = useRef(0)
   const [isDragging, setIsDragging] = useState(false)
+  const unmounted = useRef(false)
+  useEffect(() => () => { unmounted.current = true }, [])
 
   function addFiles(files: File[]) {
     if (running) return
@@ -113,17 +156,52 @@ export default function BulkUploadPage() {
   const uniqueTopicIds = [...new Set(doneEntries.map((e) => e.result!.topic_id))]
   const newTopicsCount = doneEntries.filter((e) => e.result!.was_created).length
 
+  // Build a map from topic_id -> topic_name from doneEntries for display
+  const topicNames: Record<string, string> = {}
+  for (const e of doneEntries) {
+    if (e.result && !(e.result.topic_id in topicNames)) {
+      topicNames[e.result.topic_id] = e.result.topic_name
+    }
+  }
+
   async function processTopics() {
     if (processing) return
     setProcessing(true)
-    for (const topicId of uniqueTopicIds) {
-      try {
-        await api.topics.process(topicId)
-      } catch {
-        // best-effort per topic
-      }
+
+    // Initialize all topics as queued
+    const initial: Record<string, TopicProcessState> = {}
+    for (const id of uniqueTopicIds) {
+      initial[id] = { status: 'queued', error: null }
     }
-    setProcessing(false)
+    setTopicStatus(initial)
+
+    await Promise.all(
+      uniqueTopicIds.map(async (topicId) => {
+        let jobId: string
+        try {
+          const job = await api.topics.process(topicId)
+          if (unmounted.current) return
+          jobId = job.id
+          setTopicStatus((prev) => ({ ...prev, [topicId]: { status: 'running', error: null } }))
+        } catch (err) {
+          if (unmounted.current) return
+          const message = err instanceof Error ? err.message : 'Failed to start job'
+          setTopicStatus((prev) => ({ ...prev, [topicId]: { status: 'failed', error: message } }))
+          return
+        }
+
+        await pollJobUntilDone(
+          jobId,
+          (status, error) => {
+            if (unmounted.current) return
+            setTopicStatus((prev) => ({ ...prev, [topicId]: { status, error } }))
+          },
+          () => unmounted.current,
+        )
+      })
+    )
+
+    if (!unmounted.current) setProcessing(false)
   }
 
   return (
@@ -219,7 +297,7 @@ export default function BulkUploadPage() {
             {running ? 'Uploading…' : 'Upload All'}
           </button>
           <button
-            onClick={() => { setEntries([]); setInvalidFiles([]) }}
+            onClick={() => { setEntries([]); setInvalidFiles([]); setTopicStatus({}) }}
             disabled={running}
             className="px-4 py-2 rounded-lg text-sm font-medium text-ink-300 hover:text-ink-100 hover:bg-ink-800/60 transition-colors disabled:opacity-40"
           >
@@ -240,13 +318,36 @@ export default function BulkUploadPage() {
             )}
           </p>
           {uniqueTopicIds.length > 0 && (
-            <button
-              onClick={processTopics}
-              disabled={processing}
-              className="mt-3 btn-primary disabled:opacity-50"
-            >
-              {processing ? 'Processing…' : 'Process all topics'}
-            </button>
+            <>
+              <button
+                onClick={processTopics}
+                disabled={processing}
+                className="mt-3 btn-primary disabled:opacity-50"
+              >
+                {processing ? 'Processing…' : 'Process all topics'}
+              </button>
+              {Object.keys(topicStatus).length > 0 && (
+                <div className="mt-4 space-y-2">
+                  {uniqueTopicIds.map((topicId) => {
+                    const ts = topicStatus[topicId]
+                    if (!ts) return null
+                    return (
+                      <div key={topicId} className="flex items-start gap-2">
+                        <span className="text-ink-300 text-sm flex-1 truncate">
+                          {topicNames[topicId] ?? topicId}
+                        </span>
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${TOPIC_STATUS_BADGE[ts.status]}`}>
+                          {ts.status}
+                        </span>
+                        {ts.error && (
+                          <span className="text-rose-400 text-xs ml-1 truncate max-w-xs">{ts.error}</span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

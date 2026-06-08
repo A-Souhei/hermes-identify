@@ -1,15 +1,25 @@
 'use client'
 
 import Link from 'next/link'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api, Topic } from '@/lib/api'
 import { relativeTime } from '@/lib/format'
 
-function TopicCard({ topic }: { topic: Topic }) {
+function TopicCard({ topic, processing }: { topic: Topic; processing?: boolean }) {
   return (
     <div className="card-hover p-5 flex flex-col gap-3">
       <div className="flex-1 min-w-0 space-y-1">
-        <h2 className="font-semibold text-ink-50 leading-snug truncate">{topic.name}</h2>
+        <div className="flex items-center gap-2 min-w-0">
+          <h2 className="font-semibold text-ink-50 leading-snug truncate">{topic.name}</h2>
+          {processing && (
+            <span className="flex items-center gap-1 shrink-0">
+              <svg className="w-3.5 h-3.5 animate-spin text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-9-9" />
+              </svg>
+              <span className="text-amber-300 text-xs">Processing…</span>
+            </span>
+          )}
+        </div>
         {topic.description ? (
           <p className="text-ink-400 text-sm line-clamp-2">{topic.description}</p>
         ) : (
@@ -67,6 +77,8 @@ export default function TopicsPage() {
   const [creating, setCreating] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [processing, setProcessing] = useState<Record<string, boolean>>({})
+  const prevProcessing = useRef<Record<string, boolean>>({})
 
   const addToast = (message: string, type: Toast['type']) => {
     const id = Date.now()
@@ -93,6 +105,41 @@ export default function TopicsPage() {
     loadTopics(controller.signal)
     return () => controller.abort()
   }, [])
+
+  useEffect(() => {
+    if (topics.length === 0) return
+    let cancelled = false
+
+    const poll = async () => {
+      const results = await Promise.all(
+        topics.map((t) =>
+          api.topics.activeJob(t.id).then(
+            (job) => ({ id: t.id, active: job !== null }),
+            () => ({ id: t.id, active: false }),
+          )
+        )
+      )
+      if (cancelled) return
+      const next: Record<string, boolean> = {}
+      for (const { id, active } of results) next[id] = active
+      // Detect any topic that just finished, then refresh the list — done outside
+      // the state updater so it doesn't re-trigger this effect or run a side
+      // effect during render.
+      const finished = Object.keys(prevProcessing.current).some(
+        (id) => prevProcessing.current[id] && !next[id]
+      )
+      prevProcessing.current = next
+      setProcessing(next)
+      if (finished) loadTopics()
+    }
+
+    poll()
+    const timer = setInterval(poll, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [topics])
 
   const openModal = () => {
     setName('')
@@ -185,7 +232,7 @@ export default function TopicsPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
           {topics.map((t) => (
-            <TopicCard key={t.id} topic={t} />
+            <TopicCard key={t.id} topic={t} processing={!!processing[t.id]} />
           ))}
         </div>
       )}

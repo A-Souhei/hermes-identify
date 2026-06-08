@@ -230,7 +230,8 @@ class TestTopicIndex:
 class TestFullPipelineWithIndex:
     async def test_process_creates_sections(self, test_engine, db_session, mock_indexer_llm):
         from main import _run_process_job
-        from sqlalchemy import select
+        from models import chunk_subtopics
+        from sqlalchemy import insert, select
         from unittest.mock import AsyncMock, patch
 
         topic = Topic(id="topic-pi", name="T")
@@ -238,27 +239,34 @@ class TestFullPipelineWithIndex:
         doc = Document(id="doc-pi", topic_id="topic-pi",
                        source_type=SourceType.FILE, source_ref="f.md", filename="f.md")
         db_session.add(doc)
-        st = SubTopic(id="st-pi", topic_id="topic-pi", name="Climate Science", description="Sci")
-        db_session.add(st)
         job = Job(id="job-pi", topic_id="topic-pi", type="process", status=JobStatus.PENDING)
         db_session.add(job)
-        ent1 = Entity(id="ent-pi-1", topic_id="topic-pi", subtopic_id="st-pi",
-                      name="Carbon Budget", ref_id="ENT-000001")
-        ent2 = Entity(id="ent-pi-2", topic_id="topic-pi", subtopic_id="st-pi",
-                      name="Emission Pathway", ref_id="ENT-000002")
-        db_session.add(ent1)
-        db_session.add(ent2)
-
         chunk = Chunk(id="ch-pi", document_id="doc-pi", topic_id="topic-pi",
                       content="text", chunk_index=0)
         db_session.add(chunk)
         await db_session.commit()
 
+        # discover/entify run inside the job (after the re-process cleanup), so they
+        # create the subtopic and entities rather than rely on pre-seeded rows.
+        async def fake_discover(chunks_arg, topic_id, db):
+            st = SubTopic(id="st-pi", topic_id=topic_id, name="Climate Science", description="Sci")
+            db.add(st)
+            await db.flush()
+            await db.execute(insert(chunk_subtopics).values(chunk_id="ch-pi", subtopic_id="st-pi"))
+            return [st]
+
+        async def fake_entify(subtopics, topic_id, db):
+            db.add(Entity(id="ent-pi-1", topic_id=topic_id, subtopic_id="st-pi",
+                          name="Carbon Budget", ref_id="ENT-000001"))
+            db.add(Entity(id="ent-pi-2", topic_id=topic_id, subtopic_id="st-pi",
+                          name="Emission Pathway", ref_id="ENT-000002"))
+            await db.flush()
+
         session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
         with (
-            patch("classifier.discover_subtopics", AsyncMock(return_value=[st])),
+            patch("classifier.discover_subtopics", side_effect=fake_discover),
             patch("classifier.assign_chunks_to_subtopics", AsyncMock()),
-            patch("entifier.entify_all_subtopics", AsyncMock()),
+            patch("entifier.entify_all_subtopics", side_effect=fake_entify),
         ):
             await _run_process_job("job-pi", session_factory=session_factory)
 
@@ -270,7 +278,8 @@ class TestFullPipelineWithIndex:
         )).scalars().all()
         assert len(sections) == 2
 
-        await db_session.refresh(ent1)
-        await db_session.refresh(ent2)
-        assert ent1.section_id is not None
-        assert ent2.section_id is not None
+        entities = (await db_session.execute(
+            select(Entity).where(Entity.topic_id == "topic-pi")
+        )).scalars().all()
+        assert len(entities) == 2
+        assert all(e.section_id is not None for e in entities)

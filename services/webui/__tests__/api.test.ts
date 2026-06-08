@@ -197,6 +197,18 @@ describe('api.topics', () => {
     const call = (global.fetch as jest.Mock).mock.calls[0]
     expect(JSON.parse(call[1].body)).toMatchObject({ query: 'wind', limit: 5 })
   })
+
+  it('activeJob calls GET /api/entifier/topics/:id/active-job', async () => {
+    mockFetch({ id: 'j1', topic_id: 'abc', type: 'process', status: 'running', error: null, created_at: '', completed_at: null })
+    await api.topics.activeJob('abc')
+    expect(global.fetch).toHaveBeenCalledWith('/api/entifier/topics/abc/active-job', expect.objectContaining({}))
+  })
+
+  it('activeJob returns null when no active job', async () => {
+    mockFetch(null)
+    const result = await api.topics.activeJob('abc')
+    expect(result).toBeNull()
+  })
 })
 
 describe('api.jobs', () => {

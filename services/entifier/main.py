@@ -1,10 +1,13 @@
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 
+logger = logging.getLogger("entifier")
+
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -17,6 +20,8 @@ from models import (
     _now,
     Chunk,
     ChunkSummary,
+    chunk_entities,
+    chunk_subtopics,
     Document,
     DocumentOut,
     Dossier,
@@ -24,10 +29,12 @@ from models import (
     DossierBlockCreate,
     DossierBlockPatch,
     DossierBlockResolved,
+    DossierBlocksReorder,
     DossierCreate,
     DossierDetail,
     DossierOut,
     DossierPatch,
+    DossierRenderBlock,
     Entity,
     EntityDetailOut,
     EntityIndexItem,
@@ -35,6 +42,7 @@ from models import (
     EntityPatch,
     EntitySearchHit,
     Image,
+    image_entities,
     ImageOut,
     ImageSearchHit,
     IngestUrlRequest,
@@ -415,6 +423,26 @@ async def get_image_content(image_id: str, db: DB):
 
 # ── Background job runner ─────────────────────────────────────────────────────
 
+async def _clear_topic_derived_data(topic_id: str, db: AsyncSession) -> None:
+    """Remove derived artifacts (subtopics, sections, entities and their
+    association rows) for a topic so a re-process rebuilds cleanly instead of
+    appending duplicates. Source data (documents, chunks, images) is preserved;
+    none of these artifacts live in Qdrant, so no vector cleanup is needed.
+    """
+    entity_ids = select(Entity.id).where(Entity.topic_id == topic_id)
+    subtopic_ids = select(SubTopic.id).where(SubTopic.topic_id == topic_id)
+
+    # Association tables have no ON DELETE CASCADE, so clear their rows first.
+    await db.execute(delete(chunk_entities).where(chunk_entities.c.entity_id.in_(entity_ids)))
+    await db.execute(delete(image_entities).where(image_entities.c.entity_id.in_(entity_ids)))
+    await db.execute(delete(chunk_subtopics).where(chunk_subtopics.c.subtopic_id.in_(subtopic_ids)))
+
+    # Entities reference subtopics and sections, so delete them before those.
+    await db.execute(delete(Entity).where(Entity.topic_id == topic_id))
+    await db.execute(delete(Section).where(Section.topic_id == topic_id))
+    await db.execute(delete(SubTopic).where(SubTopic.topic_id == topic_id))
+
+
 async def _run_process_job(job_id: str, session_factory=None) -> None:
     from classifier import assign_chunks_to_subtopics, discover_subtopics
 
@@ -435,6 +463,11 @@ async def _run_process_job(job_id: str, session_factory=None) -> None:
                 job.completed_at = datetime.now(timezone.utc)
                 await db.commit()
                 return
+
+            # Re-processing rebuilds from scratch: drop prior subtopics,
+            # sections and entities so they aren't duplicated.
+            await _clear_topic_derived_data(job.topic_id, db)
+            await db.commit()
 
             subtopics = await discover_subtopics(chunks, job.topic_id, db)
             await db.commit()
@@ -467,12 +500,39 @@ async def process_topic(topic_id: str, db: DB, background_tasks: BackgroundTasks
     topic = await db.get(Topic, topic_id)
     if not topic:
         raise HTTPException(status_code=404, detail="topic not found")
+    existing = await db.execute(
+        select(Job).where(
+            Job.topic_id == topic_id,
+            Job.type == "process",
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+        )
+    )
+    in_flight = existing.scalar_one_or_none()
+    if in_flight is not None:
+        return in_flight
     job = Job(topic_id=topic_id, type="process")
     db.add(job)
     await db.commit()
     await db.refresh(job)
     background_tasks.add_task(_run_process_job, job.id)
     return job
+
+
+@app.get("/topics/{topic_id}/active-job", response_model=Optional[JobOut])
+async def get_active_job(topic_id: str, db: DB):
+    topic = await db.get(Topic, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="topic not found")
+    result = await db.execute(
+        select(Job)
+        .where(
+            Job.topic_id == topic_id,
+            Job.type == "process",
+            Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+        )
+        .order_by(Job.created_at.desc())
+    )
+    return result.scalars().first()
 
 
 @app.get("/jobs/{job_id}", response_model=JobOut)
@@ -877,6 +937,310 @@ async def get_dossier(dossier_id: str, db: DB):
     )
 
 
+# ── Dossier render helpers ────────────────────────────────────────────────────
+
+import re as _re
+
+
+async def _document_full_text(doc: Document, cache: dict) -> str:
+    """Download and parse a document's raw bytes into plain text, cached by doc.id."""
+    if doc.id in cache:
+        return cache[doc.id]
+    try:
+        if not doc.minio_key:
+            raise ValueError("no minio_key")
+        content: bytes = await storage.download_file(doc.minio_key)
+        suffix = Path(doc.filename or "").suffix.lower() if doc.filename else ""
+        if suffix == ".pdf":
+            from ingestor import parse_pdf
+            text, _ = await parse_pdf(content)
+        elif suffix == ".csv":
+            from ingestor import parse_csv
+            text = parse_csv(content)
+        elif suffix == ".json":
+            from ingestor import parse_json
+            text = parse_json(content)
+        elif suffix in (".yaml", ".yml"):
+            from ingestor import parse_yaml
+            text = parse_yaml(content)
+        else:
+            from ingestor import parse_md
+            text = parse_md(content)
+    except Exception as exc:
+        logger.warning("dossier render: could not load/parse document %s: %s", doc.id, exc)
+        text = ""
+    cache[doc.id] = text
+    return text
+
+
+def _chunk_offsets(full_text: str, chunks_ordered: list) -> dict:
+    """Map each chunk id to its (start, end) byte offsets in full_text."""
+    offsets: dict = {}
+    cursor = 0
+    for chunk in sorted(chunks_ordered, key=lambda c: c.chunk_index):
+        pos = full_text.find(chunk.content, cursor)
+        if pos == -1:
+            pos = full_text.find(chunk.content)
+        if pos == -1:
+            continue
+        offsets[chunk.id] = (pos, pos + len(chunk.content))
+        cursor = pos + 1
+    return offsets
+
+
+def _merge_intervals(intervals: list) -> list:
+    """Merge overlapping/adjacent intervals into sorted non-overlapping list."""
+    if not intervals:
+        return []
+    sorted_iv = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_iv[0]]
+    for s, e in sorted_iv[1:]:
+        if s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _subtract_intervals(targets: list, taken: list) -> list:
+    """Return the regions in targets that don't overlap with taken."""
+    if not taken:
+        return targets
+    result = []
+    for ts, te in targets:
+        remaining = [(ts, te)]
+        for rs, re_ in taken:
+            new_remaining = []
+            for s, e in remaining:
+                if re_ <= s or rs >= e:
+                    new_remaining.append((s, e))
+                else:
+                    if s < rs:
+                        new_remaining.append((s, rs))
+                    if re_ < e:
+                        new_remaining.append((re_, e))
+            remaining = new_remaining
+        result.extend(remaining)
+    return result
+
+
+_TABLE_RE = _re.compile(r'<table\b[^>]*>.*?</table>', _re.DOTALL | _re.IGNORECASE)
+_FOOTNOTE_REF_RE = _re.compile(r'\[\^[^\]]+\]')
+_FOOTNOTE_DEF_RE = _re.compile(r'^\[\^[^\]]+\]:.*$', _re.MULTILINE)
+_HTML_TAG_RE = _re.compile(r'<[^>]+>')
+# Merge bold runs split by a removed inline tag, e.g. "**A**™**.**" -> "**A™.**"
+_BOLD_MERGE_RE = _re.compile(r'\*\*([^*]+?)\*\*([^\s*]{1,3})\*\*([^*]+?)\*\*')
+_QUAD_STAR_RE = _re.compile(r'\*{4,}')
+_DOUBLE_DOT_RE = _re.compile(r'(?<!\.)\.\.(?!\.)')
+_MULTI_NEWLINE_RE = _re.compile(r'\n{3,}')
+# A line made up entirely of markdown-structural punctuation (e.g. ">***", "***", "---").
+_ARTIFACT_LINE_RE = _re.compile(r'[>*_~.\-`|\s]+')
+_ATX_HEADING_RE = _re.compile(r'#{1,6}\s+\S.*')
+_PSEUDO_HEADING_RE = _re.compile(r'\*{3}(.+?)\*{3}')
+
+
+def _is_dangling_heading(line: str) -> bool:
+    """A trailing line that's a heading with no body after it: an ATX heading, or
+    a short fully bold-italic pseudo-heading that isn't a real sentence (so we
+    don't drop legitimate emphasised closing lines like '***Note: do X.***')."""
+    s = line.strip()
+    if _ATX_HEADING_RE.fullmatch(s):
+        return True
+    m = _PSEUDO_HEADING_RE.fullmatch(s)
+    if m:
+        inner = m.group(1).strip()
+        return len(inner) <= 80 and inner[-1:] not in ".!?"
+    return False
+
+
+def _snap_to_paragraph(full_text: str, start: int, end: int) -> tuple:
+    """Expand an offset range outward to the nearest blank-line boundaries so
+    excerpts begin and end at paragraph breaks instead of mid-sentence. Documents
+    with no blank-line breaks are left untouched (otherwise a single chunk would
+    swallow the whole document)."""
+    if "\n\n" not in full_text:
+        return start, end
+    para_start = full_text.rfind("\n\n", 0, start)
+    start = 0 if para_start == -1 else para_start + 2
+    para_end = full_text.find("\n\n", end)
+    end = len(full_text) if para_end == -1 else para_end
+    return start, end
+
+
+def _trim_partial_tables(start: int, end: int, tables: list) -> tuple:
+    """If the span begins or ends inside an HTML table, pull the boundary out of
+    it so excerpts never include orphaned table-cell fragments (the wrapping
+    <table> tags lie outside the slice and so escape _clean_markdown). If trimming
+    would invert the span (the span is fully inside one table), leave it unchanged
+    and let _clean_markdown drop the wrapped table instead of dropping everything."""
+    new_start, new_end = start, end
+    for ts, te in tables:
+        if ts <= new_start < te:
+            new_start = te
+        if ts < new_end <= te:
+            new_end = ts
+    if new_start >= new_end:
+        return start, end
+    return new_start, new_end
+
+
+def _clean_markdown(text: str) -> str:
+    """Reduce raw source markdown to clean flowing prose: drop layout tables and
+    footnotes, strip inline HTML, repair bold runs broken by tag removal, and
+    discard punctuation-only artifact lines."""
+    text = _TABLE_RE.sub('\n\n', text)            # drop layout/callout tables wholesale
+    text = _FOOTNOTE_DEF_RE.sub('', text)
+    text = _FOOTNOTE_REF_RE.sub('', text)
+    text = _HTML_TAG_RE.sub('', text)             # keep inner text of remaining inline tags
+    for _ in range(2):
+        text = _BOLD_MERGE_RE.sub(r'**\1\2\3**', text)
+    text = _QUAD_STAR_RE.sub('', text)            # collapse "****" emphasis noise
+    text = _DOUBLE_DOT_RE.sub('.', text)
+    # Drop lines that are nothing but markdown-structural punctuation (">***", "***").
+    lines = [
+        ln for ln in text.split('\n')
+        if not ln.strip() or not _ARTIFACT_LINE_RE.fullmatch(ln.strip())
+    ]
+    # Drop trailing headings with no body text after them (dangling section titles
+    # left behind when their table/body was removed).
+    while lines:
+        last = lines[-1].strip()
+        if not last or _is_dangling_heading(last):
+            lines.pop()
+        else:
+            break
+    text = '\n'.join(lines)
+    text = _MULTI_NEWLINE_RE.sub('\n\n', text)
+    return text.strip()
+
+
+@app.get("/dossiers/{dossier_id}/render", response_model=list[DossierRenderBlock])
+async def render_dossier(dossier_id: str, db: DB):
+    result = await db.execute(
+        select(Dossier).where(Dossier.id == dossier_id).options(selectinload(Dossier.blocks))
+    )
+    dossier = result.scalar_one_or_none()
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+
+    text_cache: dict = {}
+    # emitted[doc_id] = merged list of (start, end) intervals already output
+    emitted: dict = {}
+
+    rendered: list[DossierRenderBlock] = []
+    for block in sorted(dossier.blocks, key=lambda b: b.order_index):
+        bt = block.block_type
+        ref = block.ref_id
+
+        if bt == "image":
+            obj = await db.get(Image, ref)
+            rendered.append(DossierRenderBlock(
+                block_id=block.id, block_type=bt,
+                label=obj.filename if obj else "(deleted)",
+                paragraphs=[_clean_markdown(obj.description)] if obj and obj.description else [],
+                image_id=ref if obj else None,
+            ))
+            continue
+
+        # Resolve chunks for this block
+        block_chunks: list = []
+        label = "(deleted)"
+
+        if bt == "subtopic":
+            st_res = await db.execute(
+                select(SubTopic).where(SubTopic.id == ref).options(selectinload(SubTopic.chunks))
+            )
+            obj = st_res.scalar_one_or_none()
+            if obj:
+                label = obj.name
+                block_chunks = list(obj.chunks)
+
+        elif bt == "section":
+            sec_res = await db.execute(
+                select(Section).where(Section.id == ref).options(
+                    selectinload(Section.entities).selectinload(Entity.chunks)
+                )
+            )
+            obj = sec_res.scalar_one_or_none()
+            if obj:
+                label = obj.name
+                for ent in obj.entities:
+                    block_chunks.extend(ent.chunks)
+
+        elif bt == "entity":
+            ent_res = await db.execute(
+                select(Entity).where(Entity.id == ref).options(selectinload(Entity.chunks))
+            )
+            obj = ent_res.scalar_one_or_none()
+            if obj:
+                label = obj.name
+                block_chunks = list(obj.chunks)
+
+        # Group chunks by document
+        chunks_by_doc: dict = {}
+        for chunk in block_chunks:
+            chunks_by_doc.setdefault(chunk.document_id, []).append(chunk)
+
+        paragraphs: list[str] = []
+        seen_chunk_ids: set = set()  # for fallback dedup
+
+        for doc_id, doc_chunks in chunks_by_doc.items():
+            # Fetch the document to get created_at for ordering
+            doc = await db.get(Document, doc_id)
+            if doc is None:
+                continue
+
+            full_text = await _document_full_text(doc, text_cache)
+
+            if not full_text:
+                # Fallback: emit raw chunk content, deduped by chunk id
+                for chunk in sorted(doc_chunks, key=lambda c: c.chunk_index):
+                    if chunk.id not in seen_chunk_ids:
+                        seen_chunk_ids.add(chunk.id)
+                        cleaned = _clean_markdown(chunk.content)
+                        if cleaned:
+                            paragraphs.append(cleaned)
+                continue
+
+            offsets = _chunk_offsets(full_text, doc_chunks)
+            if not offsets:
+                continue
+
+            # Coherent excerpt: one contiguous span from the block's earliest to
+            # latest chunk, snapped to paragraph boundaries and pulled clear of any
+            # partial table, instead of stitching scattered fragments.
+            iv = list(offsets.values())
+            tables = [(m.start(), m.end()) for m in _TABLE_RE.finditer(full_text)]
+            s0, e0 = _snap_to_paragraph(full_text, min(s for s, _ in iv), max(e for _, e in iv))
+            s0, e0 = _trim_partial_tables(s0, e0, tables)
+            if s0 >= e0:
+                continue
+            span = (s0, e0)
+
+            already_emitted = emitted.get(doc_id, [])
+            new_intervals = _subtract_intervals([span], already_emitted)
+
+            for s, e in sorted(new_intervals, key=lambda x: x[0]):
+                cleaned = _clean_markdown(full_text[s:e])
+                if cleaned:
+                    paragraphs.append(cleaned)
+
+            if new_intervals:
+                emitted[doc_id] = _merge_intervals(already_emitted + new_intervals)
+
+        # Always emit heading blocks (subtopic/section) even if empty
+        if bt == "entity" and not paragraphs:
+            continue
+
+        rendered.append(DossierRenderBlock(
+            block_id=block.id, block_type=bt,
+            label=label,
+            paragraphs=paragraphs,
+        ))
+
+    return rendered
+
+
 @app.patch("/dossiers/{dossier_id}", response_model=DossierOut)
 async def patch_dossier(dossier_id: str, body: DossierPatch, db: DB):
     dossier = await db.get(Dossier, dossier_id)
@@ -936,6 +1300,27 @@ async def remove_dossier_block(dossier_id: str, block_id: str, db: DB):
     if dossier:
         dossier.updated_at = _now()
     await db.delete(block)
+    await db.commit()
+
+
+@app.patch("/dossiers/{dossier_id}/blocks/reorder", status_code=204)
+async def reorder_dossier_blocks(dossier_id: str, body: DossierBlocksReorder, db: DB):
+    dossier = await db.get(Dossier, dossier_id)
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+
+    result = await db.execute(
+        select(DossierBlock).where(DossierBlock.dossier_id == dossier_id)
+    )
+    existing = {b.id: b for b in result.scalars().all()}
+
+    if len(body.block_ids) != len(existing) or set(body.block_ids) != set(existing.keys()):
+        raise HTTPException(status_code=422, detail="block_ids must contain exactly all blocks in this dossier")
+
+    for i, bid in enumerate(body.block_ids):
+        existing[bid].order_index = i
+
+    dossier.updated_at = _now()
     await db.commit()
 
 

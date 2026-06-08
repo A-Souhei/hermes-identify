@@ -81,6 +81,38 @@ class TestProcessEndpoint:
         r = await client.post("/topics/nope/process")
         assert r.status_code == 404
 
+    async def test_concurrent_process_returns_same_job(self, client: AsyncClient, db_session):
+        """Double-POST while a job is RUNNING returns the same job id — no duplicate created."""
+        from sqlalchemy import select as sa_select
+        from models import Job
+
+        topic_r = await client.post("/topics", json={"name": "Dedup"})
+        tid = topic_r.json()["id"]
+
+        # Patch so the background task never actually runs (job stays PENDING/RUNNING)
+        with patch("main._run_process_job", new_callable=AsyncMock):
+            r1 = await client.post(f"/topics/{tid}/process")
+        assert r1.status_code == 202
+        job_id_1 = r1.json()["id"]
+
+        # Manually set job to RUNNING to exercise that branch of the guard
+        job = await db_session.get(Job, job_id_1)
+        job.status = JobStatus.RUNNING
+        await db_session.commit()
+
+        # Second POST — should return the in-flight job, not create a new one
+        with patch("main._run_process_job", new_callable=AsyncMock):
+            r2 = await client.post(f"/topics/{tid}/process")
+        assert r2.status_code == 202
+        assert r2.json()["id"] == job_id_1
+
+        # Confirm only one Job row exists for this topic
+        result = await db_session.execute(
+            sa_select(Job).where(Job.topic_id == tid, Job.type == "process")
+        )
+        jobs = result.scalars().all()
+        assert len(jobs) == 1
+
 
 class TestGetJob:
     async def test_get_existing_job(self, client: AsyncClient):
@@ -95,6 +127,38 @@ class TestGetJob:
 
     async def test_job_not_found(self, client: AsyncClient):
         r = await client.get("/jobs/nonexistent")
+        assert r.status_code == 404
+
+
+class TestGetActiveJob:
+    async def test_returns_running_job(self, client: AsyncClient, db_session):
+        topic_r = await client.post("/topics", json={"name": "ActiveJobTopic"})
+        tid = topic_r.json()["id"]
+        with patch("main._run_process_job", new_callable=AsyncMock):
+            job_r = await client.post(f"/topics/{tid}/process")
+        job_id = job_r.json()["id"]
+
+        # Manually set job to RUNNING
+        job = await db_session.get(Job, job_id)
+        job.status = JobStatus.RUNNING
+        await db_session.commit()
+
+        r = await client.get(f"/topics/{tid}/active-job")
+        assert r.status_code == 200
+        data = r.json()
+        assert data is not None
+        assert data["id"] == job_id
+        assert data["status"] == "running"
+
+    async def test_returns_null_when_no_active_job(self, client: AsyncClient):
+        topic_r = await client.post("/topics", json={"name": "InactiveTopic"})
+        tid = topic_r.json()["id"]
+        r = await client.get(f"/topics/{tid}/active-job")
+        assert r.status_code == 200
+        assert r.json() is None
+
+    async def test_unknown_topic_returns_404(self, client: AsyncClient):
+        r = await client.get("/topics/nonexistent-topic/active-job")
         assert r.status_code == 404
 
 
